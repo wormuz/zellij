@@ -15,3 +15,6 @@ fn toggle_mouse_mode_message_maps_to_client_instruction() {
 
 #[cfg(test)]
 mod teardown_tests;
+
+#[cfg(test)]
+mod ipc_pipe_length_tests;
