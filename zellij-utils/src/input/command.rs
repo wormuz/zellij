@@ -71,6 +71,8 @@ pub struct RunCommand {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
     #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
     pub hold_on_close: bool,
     #[serde(default)]
     pub hold_on_start: bool,
@@ -108,6 +110,8 @@ pub struct RunCommandAction {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
     #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
     pub direction: Option<Direction>,
     #[serde(default)]
     pub hold_on_close: bool,
@@ -127,6 +131,7 @@ impl From<RunCommandAction> for RunCommand {
             command: action.command,
             args: action.args,
             cwd: action.cwd,
+            env: action.env,
             hold_on_close: action.hold_on_close,
             hold_on_start: action.hold_on_start,
             originating_plugin: action.originating_plugin,
@@ -142,6 +147,7 @@ impl From<RunCommand> for RunCommandAction {
             command: run_command.command,
             args: run_command.args,
             cwd: run_command.cwd,
+            env: run_command.env,
             direction: None,
             hold_on_close: run_command.hold_on_close,
             hold_on_start: run_command.hold_on_start,

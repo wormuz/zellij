@@ -42,6 +42,28 @@ pub use popup_keys::PopupScroll;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn terminal_action_with_env(
+    command: Option<RunCommandAction>,
+    default_shell: &Option<TerminalAction>,
+    env: &BTreeMap<String, String>,
+) -> Option<TerminalAction> {
+    let terminal_action = command
+        .map(|cmd| TerminalAction::RunCommand(cmd.into()))
+        .or_else(|| default_shell.clone());
+    if env.is_empty() {
+        return terminal_action;
+    }
+    let mut terminal_action = terminal_action.unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: get_default_shell(),
+            use_terminal_title: true,
+            ..Default::default()
+        })
+    });
+    terminal_action.merge_env(env);
+    Some(terminal_action)
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
     pub exit_status: Option<i32>,
@@ -1770,14 +1792,7 @@ fn route_action_with_origin(
                 .send_to_screen(instruction)
                 .with_context(err_context)?;
         },
-        Action::ToggleMouseMode => {
-            if let Some(ref os_input) = os_input {
-                os_input
-                    .send_to_client(client_id, ServerToClientMsg::ToggleMouseMode)
-                    .with_context(err_context)?;
-            }
-            drop(NotificationEnd::new(completion_tx));
-        },
+        Action::ToggleMouseMode => {}, // Handled client side
         Action::PreviousSwapLayout => {
             senders
                 .send_to_screen(ScreenInstruction::PreviousSwapLayout(

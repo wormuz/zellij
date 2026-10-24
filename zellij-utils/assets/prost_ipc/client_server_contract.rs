@@ -1780,6 +1780,8 @@ pub struct RunCommandAction {
     pub use_terminal_title: bool,
     #[prost(bool, tag="9")]
     pub notify: bool,
+    #[prost(map="string, string", tag="10")]
+    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

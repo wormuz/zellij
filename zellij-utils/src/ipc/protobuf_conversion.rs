@@ -4722,6 +4722,7 @@ impl From<crate::input::command::RunCommandAction>
             command: action.command.to_string_lossy().to_string(),
             args: action.args,
             cwd: action.cwd.map(|p| p.to_string_lossy().to_string()),
+            env: action.env.into_iter().collect(),
             direction: action.direction.map(|d| direction_to_proto_i32(d)),
             hold_on_close: action.hold_on_close,
             hold_on_start: action.hold_on_start,
@@ -4825,6 +4826,7 @@ impl From<crate::input::layout::Run>
                         command: cmd.command.to_string_lossy().to_string(),
                         args: cmd.args,
                         cwd: cmd.cwd.map(|p| p.to_string_lossy().to_string()),
+                        env: cmd.env.into_iter().collect(),
                         direction: None, // RunCommand doesn't have direction field
                         hold_on_close: cmd.hold_on_close,
                         hold_on_start: cmd.hold_on_start,
@@ -5216,6 +5218,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Run>
                     command: std::path::PathBuf::from(cmd.command),
                     args: cmd.args,
                     cwd: cmd.cwd.map(std::path::PathBuf::from),
+                    env: cmd.env.into_iter().collect(),
                     hold_on_close: cmd.hold_on_close,
                     hold_on_start: cmd.hold_on_start,
                     originating_plugin: cmd
@@ -5326,6 +5329,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::RunCommandAc
             command: std::path::PathBuf::from(action.command),
             args: action.args,
             cwd: action.cwd.map(std::path::PathBuf::from),
+            env: action.env.into_iter().collect(),
             direction: action.direction.map(proto_i32_to_direction).transpose()?,
             hold_on_close: action.hold_on_close,
             hold_on_start: action.hold_on_start,

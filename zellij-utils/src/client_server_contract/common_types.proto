@@ -1042,6 +1042,7 @@ message RunCommandAction {
   optional OriginatingPlugin originating_plugin = 7;   // Added missing originating_plugin field
   bool use_terminal_title = 8;                         // Added missing use_terminal_title field
   bool notify = 9;
+  map<string, string> env = 10;
 }
 
 message TiledPaneLayout {

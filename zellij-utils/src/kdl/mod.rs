@@ -43,6 +43,7 @@ use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 use miette::NamedSource;
+use anyhow::Context as _;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
@@ -2704,6 +2705,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 near_current_pane: false,
                 no_focus: false,
                 tab_id: None,
+                env: Default::default(),
             }),
             "CloseFocusByPaneId"
             | "ToggleFocusFullscreenByPaneId"
