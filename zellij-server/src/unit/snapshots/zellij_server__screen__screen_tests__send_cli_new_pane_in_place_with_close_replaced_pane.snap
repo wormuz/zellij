@@ -16,7 +16,7 @@ Some(
                     hold_on_start: false,
                     originating_plugin: None,
                     use_terminal_title: false,
-                    env: {},
+                    notify: false,
                 },
             ),
         ),
@@ -36,5 +36,6 @@ Some(
                 stdout_message: None,
             },
         ),
+        None,
     ),
 )

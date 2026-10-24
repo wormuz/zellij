@@ -1,5 +1,6 @@
 use super::super::layout::*;
 use insta::assert_snapshot;
+use std::collections::BTreeMap;
 
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
@@ -2577,73 +2578,67 @@ fn tiled_pane_still_rejects_zero_percent() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn run_merge_env_only_affects_command() {
-    use crate::input::command::RunCommand;
-    let env: BTreeMap<String, String> = [("FOO".to_string(), "bar".to_string())].into();
+fn plugin_alias_with_configuration(name: &str, configuration: &[(&str, &str)]) -> RunPluginOrAlias {
+    let configuration: BTreeMap<String, String> = configuration
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    RunPluginOrAlias::Alias(PluginAlias::new(name, &Some(configuration), None))
+}
 
-    let mut command = Run::Command(RunCommand::new(PathBuf::from("htop")));
-    command.merge_env(&env);
-    match &command {
-        Run::Command(c) => assert_eq!(c.env, env),
-        _ => panic!("expected Run::Command"),
-    }
-
-    let mut cwd = Run::Cwd(PathBuf::from("/tmp"));
-    cwd.merge_env(&env);
-    assert_eq!(cwd, Run::Cwd(PathBuf::from("/tmp")));
-
-    let mut edit = Run::EditFile(PathBuf::from("f"), None, None);
-    edit.merge_env(&env);
-    assert_eq!(edit, Run::EditFile(PathBuf::from("f"), None, None));
+fn running_plugin_alias(name: &str, configuration: &[(&str, &str)]) -> Option<Run> {
+    Some(Run::Plugin(plugin_alias_with_configuration(
+        name,
+        configuration,
+    )))
 }
 
 #[test]
-fn positioning_all_panes_preserves_default_tab_template_children() {
-    let children = [
-        r#"pane command="ls" name="command" borderless=true"#,
-        r#"pane { pane split_direction="vertical" { pane command="ls" name="command" borderless=true; }; }"#,
-        r#"pane command="ls" name="command" borderless=true; pane cwd="/other""#,
-    ];
-    for child in children {
-        for cwd in [None, Some(PathBuf::from("/tmp"))] {
-            for focus in ["", " focus=true"] {
-                let kdl = format!(
-                    r#"layout {{
-                        default_tab_template {{
-                            children
-                            pane size=8
-                        }}
-                        tab {{ {child}; }}
-                    }}"#
-                );
-                let kdl = kdl.replace("borderless=true", &format!("borderless=true{focus}"));
-                let layout = Layout::from_kdl(&kdl, None, None, cwd.clone()).unwrap();
-                let (_, tiled, _) = layout.tabs().remove(0);
-                let mut space = PaneGeom::default();
-                space.cols.set_inner(120);
-                space.rows.set_inner(40);
-                let original = tiled
-                    .position_panes_in_space(&space, None, false, false)
-                    .unwrap();
-                let positioned = tiled
-                    .position_panes_in_space(&space, Some(tiled.pane_count()), false, false)
-                    .unwrap();
-                assert_eq!(
-                    positioned, original,
-                    "child={child}, cwd={cwd:?}, focus={focus}"
-                );
-                let focused = tiled
-                    .position_panes_in_space(&space, Some(tiled.pane_count()), false, true)
-                    .unwrap();
-                assert_eq!(
-                    focused
-                        .iter()
-                        .filter(|(pane, _)| pane.focus == Some(true))
-                        .count(),
-                    1
-                );
-            }
-        }
-    }
+fn plugin_alias_with_configuration_is_equivalent_to_running_alias_with_caller_cwd() {
+    let requested = plugin_alias_with_configuration("session-manager", &[("ignore_case", "true")]);
+    let running = running_plugin_alias(
+        "session-manager",
+        &[("ignore_case", "true"), ("caller_cwd", "/some/folder")],
+    );
+    assert!(requested.is_equivalent_to_run(&running));
+}
+
+#[test]
+fn plugin_alias_with_different_configuration_is_not_equivalent_to_running_alias() {
+    let requested = plugin_alias_with_configuration("session-manager", &[("ignore_case", "true")]);
+    let running = running_plugin_alias(
+        "session-manager",
+        &[("ignore_case", "false"), ("caller_cwd", "/some/folder")],
+    );
+    assert!(!requested.is_equivalent_to_run(&running));
+}
+
+#[test]
+fn plugin_alias_without_configuration_is_equivalent_to_running_alias_with_only_caller_cwd() {
+    let requested = RunPluginOrAlias::Alias(PluginAlias::new("session-manager", &None, None));
+    let running = running_plugin_alias("session-manager", &[("caller_cwd", "/some/folder")]);
+    assert!(requested.is_equivalent_to_run(&running));
+}
+
+#[test]
+fn plugin_alias_with_its_own_caller_cwd_is_equivalent_to_running_alias_with_another_caller_cwd() {
+    let requested = plugin_alias_with_configuration(
+        "filepicker",
+        &[("ignore_case", "true"), ("caller_cwd", "/first/folder")],
+    );
+    let running = running_plugin_alias(
+        "filepicker",
+        &[("ignore_case", "true"), ("caller_cwd", "/second/folder")],
+    );
+    assert!(requested.is_equivalent_to_run(&running));
+}
+
+#[test]
+fn plugin_aliases_with_different_names_are_not_equivalent() {
+    let requested = plugin_alias_with_configuration("session-manager", &[("ignore_case", "true")]);
+    let running = running_plugin_alias(
+        "filepicker",
+        &[("ignore_case", "true"), ("caller_cwd", "/some/folder")],
+    );
+    assert!(!requested.is_equivalent_to_run(&running));
 }

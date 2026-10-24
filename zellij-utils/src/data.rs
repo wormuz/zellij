@@ -8,7 +8,9 @@ use crate::input::layout::{
 pub use crate::input::options::PaneFrameStyle;
 use crate::pane_size::PaneGeom;
 use crate::position::Position;
-use crate::shared::{colors as default_colors, eightbit_to_rgb};
+use crate::shared::{
+    colors as ansi_colors, default_theme_colors as default_colors, eightbit_to_rgb,
+};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -69,7 +71,7 @@ pub fn client_slot_to_colors(
     colors: MultiplayerColors,
 ) -> Option<(PaletteColor, PaletteColor)> {
     // (primary color, secondary color)
-    let black = PaletteColor::EightBit(default_colors::BLACK);
+    let black = PaletteColor::EightBit(ansi_colors::BLACK);
     match display_slot {
         1 => Some((colors.player_1, black)),
         2 => Some((colors.player_2, black)),
@@ -912,6 +914,7 @@ pub enum Mouse {
     Hold(isize, usize),       // line and column
     Release(isize, usize),    // line and column
     Hover(isize, usize),      // line and column
+    DoubleClick(isize, usize),
 }
 
 impl Mouse {
@@ -919,11 +922,195 @@ impl Mouse {
         // (line, column)
         match self {
             Mouse::LeftClick(line, column) => Some((*line as usize, *column as usize)),
+            Mouse::DoubleClick(line, column) => Some((*line as usize, *column as usize)),
             Mouse::RightClick(line, column) => Some((*line as usize, *column as usize)),
             Mouse::Hold(line, column) => Some((*line as usize, *column as usize)),
             Mouse::Release(line, column) => Some((*line as usize, *column as usize)),
             Mouse::Hover(line, column) => Some((*line as usize, *column as usize)),
             _ => None,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, EnumIter,
+)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    ScrollUp,
+    ScrollDown,
+    ScrollLeft,
+    ScrollRight,
+}
+
+impl MouseButton {
+    pub fn is_wheel(&self) -> bool {
+        matches!(
+            self,
+            MouseButton::ScrollUp
+                | MouseButton::ScrollDown
+                | MouseButton::ScrollLeft
+                | MouseButton::ScrollRight
+        )
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            MouseButton::Left => "Left",
+            MouseButton::Right => "Right",
+            MouseButton::Middle => "Middle",
+            MouseButton::ScrollUp => "ScrollUp",
+            MouseButton::ScrollDown => "ScrollDown",
+            MouseButton::ScrollLeft => "ScrollLeft",
+            MouseButton::ScrollRight => "ScrollRight",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<MouseButton> {
+        use strum::IntoEnumIterator;
+        MouseButton::iter().find(|button| button.name().eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    EnumIter,
+)]
+pub enum MouseTarget {
+    #[default]
+    Any,
+    Content,
+    Frame,
+}
+
+impl MouseTarget {
+    pub fn name(&self) -> &'static str {
+        match self {
+            MouseTarget::Any => "any",
+            MouseTarget::Content => "content",
+            MouseTarget::Frame => "frame",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<MouseTarget> {
+        use strum::IntoEnumIterator;
+        MouseTarget::iter().find(|target| target.name().eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MouseTrigger {
+    pub button: MouseButton,
+    pub modifiers: BTreeSet<KeyModifier>,
+    pub click_count: u8,
+    pub target: MouseTarget,
+}
+
+impl MouseTrigger {
+    pub fn new(button: MouseButton) -> Self {
+        MouseTrigger {
+            button,
+            modifiers: BTreeSet::new(),
+            click_count: 1,
+            target: MouseTarget::Any,
+        }
+    }
+    pub fn with_modifiers(mut self, modifiers: BTreeSet<KeyModifier>) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+    pub fn with_click_count(mut self, click_count: u8) -> Self {
+        self.click_count = click_count;
+        self
+    }
+    pub fn with_target(mut self, target: MouseTarget) -> Self {
+        self.target = target;
+        self
+    }
+    pub fn parse(text: &str, target: MouseTarget) -> Result<MouseTrigger, String> {
+        let mut parts: Vec<&str> = text.split_ascii_whitespace().collect();
+        let button_text = parts
+            .pop()
+            .ok_or_else(|| "A mouse trigger needs a button".to_owned())?;
+        let button = MouseButton::from_name(button_text).ok_or_else(|| {
+            format!(
+                "Unknown mouse button '{}'; use Left, Right, Middle, ScrollUp, ScrollDown, ScrollLeft or ScrollRight",
+                button_text
+            )
+        })?;
+        let mut modifiers = BTreeSet::new();
+        let mut click_count = 1;
+        for part in parts {
+            match part.to_ascii_lowercase().as_str() {
+                "ctrl" => {
+                    modifiers.insert(KeyModifier::Ctrl);
+                },
+                "alt" => {
+                    modifiers.insert(KeyModifier::Alt);
+                },
+                "shift" => {
+                    modifiers.insert(KeyModifier::Shift);
+                },
+                "super" => {
+                    return Err(
+                        "Super cannot be used with the mouse, because terminals do not report it for mouse events"
+                            .to_owned(),
+                    )
+                },
+                "double" => click_count = 2,
+                "triple" => click_count = 3,
+                _ => {
+                    return Err(format!(
+                        "Unknown word '{}' in the mouse trigger '{}'",
+                        part, text
+                    ))
+                },
+            }
+        }
+        if click_count > 1 && button.is_wheel() {
+            return Err(format!(
+                "Double and Triple can only be used with Left, Right and Middle, not {}",
+                button.name()
+            ));
+        }
+        Ok(MouseTrigger {
+            button,
+            modifiers,
+            click_count,
+            target,
+        })
+    }
+    pub fn to_kdl(&self) -> String {
+        let mut parts: Vec<String> = self.modifiers.iter().map(|m| m.to_string()).collect();
+        match self.click_count {
+            2 => parts.push("Double".to_owned()),
+            3 => parts.push("Triple".to_owned()),
+            _ => {},
+        }
+        parts.push(self.button.name().to_owned());
+        parts.join(" ")
+    }
+    pub fn same_trigger_ignoring_target(&self, other: &MouseTrigger) -> bool {
+        self.button == other.button
+            && self.modifiers == other.modifiers
+            && self.click_count == other.click_count
+    }
+}
+
+impl fmt::Display for MouseTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.target {
+            MouseTarget::Any => write!(f, "{}", self.to_kdl()),
+            target => write!(f, "{} · {}", self.to_kdl(), target.name()),
         }
     }
 }
@@ -953,6 +1140,30 @@ pub struct StyledText {
     pub indices: Vec<Vec<usize>>,
 }
 
+impl StyledText {
+    pub fn plain(text: impl Into<String>) -> Self {
+        StyledText {
+            text: text.into(),
+            indices: vec![],
+        }
+    }
+    pub fn is_plain(&self) -> bool {
+        self.indices.iter().all(|level| level.is_empty())
+    }
+}
+
+impl From<&str> for StyledText {
+    fn from(text: &str) -> Self {
+        StyledText::plain(text)
+    }
+}
+
+impl From<String> for StyledText {
+    fn from(text: String) -> Self {
+        StyledText::plain(text)
+    }
+}
+
 /// These events can be subscribed to with subscribe method exported by `zellij-tile`.
 /// Once subscribed to, they will trigger the `update` method of the `ZellijPlugin` trait.
 #[derive(Debug, Clone, PartialEq, EnumDiscriminants, Display, Serialize, Deserialize)]
@@ -967,6 +1178,7 @@ pub enum Event {
     Key(KeyWithModifier),
     /// A mouse event happened while the user is focused on this plugin's pane
     Mouse(Mouse),
+    MouseWithModifiers(Mouse, BTreeSet<KeyModifier>),
     /// A timer expired set by the `set_timeout` method exported by `zellij-tile`.
     Timer(f64),
     /// Text was copied to the clipboard anywhere in the app
@@ -1058,6 +1270,416 @@ pub enum Event {
         pane_id: PaneId,
         reason: NestedSessionEndReason,
     },
+    ContextMenu(ContextMenuContext, Vec<ContextMenuEntry>),
+    ConfigChangesDropped(Vec<SettingKey>),
+    AvailableKeybindPresets(Vec<KeybindPresetInfo>, Vec<KeybindPresetWithError>),
+    ConfigFileChangedSinceRead,
+    PromptResult(u64, crate::prompt::PromptResult),
+    SessionSuggestions(SessionSuggestions),
+    SessionCountsUpdate(SessionCounts),
+    FolderSessionsUpdate(FolderSessions),
+    TerminalCommandSubmitted,
+    SessionPreview(SessionPreview),
+    SavedSessionPreview(SavedSessionPreview),
+    PaneAttentionChanged(PaneId, crate::attention::PaneAttention),
+    PromptShown(PaneId),
+    CommandStarted(PaneId, Option<crate::attention::CommandText>),
+    CommandFinished(PaneId, crate::attention::CommandOutcome),
+    GlobalAttentionUpdate(crate::attention::GlobalAttention),
+    SessionHistoryUpdate(crate::session_history::SessionHistoryInfo),
+    DesktopIntegration(String),
+    LiveViewStateChanged {
+        target: Option<PaneAddress>,
+        state: MirrorState,
+        input_captured: bool,
+        input_released_by: Option<LiveViewRelease>,
+        resize_allowed: bool,
+        view_only: bool,
+        pinned: bool,
+        source_size: Option<crate::pane_size::Size>,
+        release_key: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FolderRelation {
+    Here,
+    Subfolder,
+    #[default]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionSuggestionColumn {
+    pub fact: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionSuggestion {
+    pub name: String,
+    pub is_running: bool,
+    pub last_used_secs_ago: u64,
+    pub created_secs_ago: u64,
+    pub folder: Option<String>,
+    pub folder_relation: FolderRelation,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub facts: BTreeMap<String, String>,
+    pub tier: Option<u32>,
+    pub matching_columns: Vec<String>,
+    pub script_label: Option<String>,
+    pub tabs: Vec<SessionPreviewTab>,
+    pub connected_clients: usize,
+}
+
+impl SessionSuggestion {
+    pub fn column_matches(&self, fact: &str) -> bool {
+        self.matching_columns.iter().any(|c| c == fact)
+    }
+    pub fn fact_value(&self, fact: &str) -> Option<String> {
+        match fact {
+            "directory" => self.folder.clone(),
+            "git_repo" => self.repo.clone(),
+            "git_branch" => self.branch.clone(),
+            other => self.facts.get(other).cloned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionSuggestions {
+    pub folder: Option<String>,
+    pub branch: Option<String>,
+    pub columns: Vec<SessionSuggestionColumn>,
+    pub suggestions: Vec<SessionSuggestion>,
+    pub command_submitted: bool,
+    pub from_script: bool,
+    #[serde(default)]
+    pub desktop_app_running: bool,
+    #[serde(default)]
+    pub desktop_window_sessions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionCounts {
+    pub running: u32,
+    pub resumable_matching: u32,
+}
+
+impl SessionCounts {
+    pub fn total(&self) -> u32 {
+        self.running + self.resumable_matching
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FolderSessions {
+    pub folder: String,
+    pub running: Vec<String>,
+    pub resumable: Vec<String>,
+    pub full_match_running: Vec<String>,
+}
+
+impl FolderSessions {
+    pub fn total(&self) -> usize {
+        self.running.len() + self.resumable.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionPreviewPane {
+    pub id: u32,
+    pub is_plugin: bool,
+    pub title: String,
+    pub focused: bool,
+    pub contents: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionPreviewTab {
+    pub name: String,
+    pub active: bool,
+    pub panes: Vec<SessionPreviewPane>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionPreview {
+    pub session_name: String,
+    pub tab_index: Option<usize>,
+    pub active_tab_index: Option<usize>,
+    pub tab_names: Vec<String>,
+    pub contents: String,
+    pub pane_count: usize,
+    pub connected_clients: usize,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub tabs: Vec<SessionPreviewTab>,
+    #[serde(default)]
+    pub pane_id: Option<(u32, bool)>,
+    #[serde(default)]
+    pub anchor_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PreviewAnchor {
+    Bottom,
+    LastCommandOutput,
+    NewOutputStart,
+}
+
+impl PreviewAnchor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PreviewAnchor::Bottom => "bottom",
+            PreviewAnchor::LastCommandOutput => "last_command_output",
+            PreviewAnchor::NewOutputStart => "new_output_start",
+        }
+    }
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "bottom" => Some(PreviewAnchor::Bottom),
+            "last_command_output" => Some(PreviewAnchor::LastCommandOutput),
+            "new_output_start" => Some(PreviewAnchor::NewOutputStart),
+            _ => None,
+        }
+    }
+    pub fn for_status(status: crate::attention::AttentionStatus) -> Self {
+        use crate::attention::AttentionStatus;
+        match status {
+            AttentionStatus::Failed | AttentionStatus::Done => PreviewAnchor::LastCommandOutput,
+            AttentionStatus::NewOutput => PreviewAnchor::NewOutputStart,
+            _ => PreviewAnchor::Bottom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SavedPanePreview {
+    pub title: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub contents: Option<String>,
+    pub focused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SavedTabPreview {
+    pub name: String,
+    pub focused: bool,
+    pub panes: Vec<SavedPanePreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SavedSessionPreview {
+    pub session_name: String,
+    pub folder: Option<String>,
+    pub tabs: Vec<SavedTabPreview>,
+    pub error: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContextMenuKind {
+    Pane,
+    PaneFrame,
+    Tab,
+    Bar,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMenuContext {
+    pub kind: ContextMenuKind,
+    pub pane_id: Option<PaneId>,
+    pub pane_is_floating: bool,
+    pub tab_index: Option<usize>,
+    pub tab_id: Option<usize>,
+    pub tab_count: usize,
+    pub line: usize,
+    pub column: usize,
+    pub client_id: ClientId,
+}
+
+impl ContextMenuContext {
+    pub fn target_pane_id(&self) -> Option<PaneId> {
+        match self.kind {
+            ContextMenuKind::Pane | ContextMenuKind::PaneFrame => self.pane_id,
+            _ => None,
+        }
+    }
+    pub fn target_tab_id(&self) -> Option<u64> {
+        self.tab_id.map(|id| id as u64)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClickedPaneAction {
+    CloseFocus,
+    ToggleFocusFullscreen,
+    ToggleEmbedOrFloating,
+    TogglePinned,
+    ToggleInGroup,
+    StartRename,
+    ToggleMute,
+    ToggleIgnoreOutput,
+    ToggleWatch,
+}
+
+impl ClickedPaneAction {
+    pub const ALL: [ClickedPaneAction; 9] = [
+        ClickedPaneAction::CloseFocus,
+        ClickedPaneAction::ToggleFocusFullscreen,
+        ClickedPaneAction::ToggleEmbedOrFloating,
+        ClickedPaneAction::TogglePinned,
+        ClickedPaneAction::ToggleInGroup,
+        ClickedPaneAction::StartRename,
+        ClickedPaneAction::ToggleMute,
+        ClickedPaneAction::ToggleIgnoreOutput,
+        ClickedPaneAction::ToggleWatch,
+    ];
+    pub fn kdl_name(&self) -> &'static str {
+        match self {
+            ClickedPaneAction::CloseFocus => "CloseFocusByPaneId",
+            ClickedPaneAction::ToggleFocusFullscreen => "ToggleFocusFullscreenByPaneId",
+            ClickedPaneAction::ToggleEmbedOrFloating => "TogglePaneEmbedOrFloatingByPaneId",
+            ClickedPaneAction::TogglePinned => "TogglePanePinnedByPaneId",
+            ClickedPaneAction::ToggleInGroup => "TogglePaneInGroupByPaneId",
+            ClickedPaneAction::StartRename => "StartRenamePaneByPaneId",
+            ClickedPaneAction::ToggleMute => "MutePaneByPaneId",
+            ClickedPaneAction::ToggleIgnoreOutput => "IgnorePaneOutputByPaneId",
+            ClickedPaneAction::ToggleWatch => "WatchPaneByPaneId",
+        }
+    }
+    pub fn from_kdl_name(name: &str) -> Option<Self> {
+        ClickedPaneAction::ALL
+            .into_iter()
+            .find(|action| action.kdl_name() == name)
+    }
+    pub fn with_pane(&self, pane_id: PaneId) -> Action {
+        match self {
+            ClickedPaneAction::CloseFocus => Action::CloseFocusByPaneId { pane_id },
+            ClickedPaneAction::ToggleFocusFullscreen => {
+                Action::ToggleFocusFullscreenByPaneId { pane_id }
+            },
+            ClickedPaneAction::ToggleEmbedOrFloating => {
+                Action::TogglePaneEmbedOrFloatingByPaneId { pane_id }
+            },
+            ClickedPaneAction::TogglePinned => Action::TogglePanePinnedByPaneId { pane_id },
+            ClickedPaneAction::ToggleInGroup => Action::TogglePaneInGroupByPaneId { pane_id },
+            ClickedPaneAction::StartRename => Action::StartRenamePaneByPaneId { pane_id },
+            ClickedPaneAction::ToggleMute => Action::MutePaneByPaneId { pane_id },
+            ClickedPaneAction::ToggleIgnoreOutput => Action::IgnorePaneOutputByPaneId { pane_id },
+            ClickedPaneAction::ToggleWatch => Action::WatchPaneByPaneId { pane_id },
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClickedTabAction {
+    Close,
+    StartRename,
+    Move(Direction),
+    MoveToPosition(u64),
+    Mute,
+}
+
+pub const TAB_POSITION_END: u64 = u64::MAX;
+
+impl ClickedTabAction {
+    pub fn kdl_name(&self) -> &'static str {
+        match self {
+            ClickedTabAction::Close => "CloseTabById",
+            ClickedTabAction::StartRename => "StartRenameTabByTabId",
+            ClickedTabAction::Move(_) => "MoveTabByTabId",
+            ClickedTabAction::MoveToPosition(_) => "MoveTabToPosition",
+            ClickedTabAction::Mute => "MuteTabByTabId",
+        }
+    }
+    pub fn with_tab(&self, id: u64) -> Action {
+        match self {
+            ClickedTabAction::Close => Action::CloseTabById { id },
+            ClickedTabAction::StartRename => Action::StartRenameTabByTabId { id },
+            ClickedTabAction::Move(direction) => Action::MoveTabByTabId {
+                id,
+                direction: *direction,
+            },
+            ClickedTabAction::MoveToPosition(position) => Action::MoveTabToPosition {
+                id,
+                position: *position,
+            },
+            ClickedTabAction::Mute => Action::MuteTabByTabId { id },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ContextMenuAction {
+    Action(Action),
+    ClickedPane(ClickedPaneAction),
+    ClickedTab(ClickedTabAction),
+}
+
+impl From<Action> for ContextMenuAction {
+    fn from(action: Action) -> Self {
+        ContextMenuAction::Action(action)
+    }
+}
+
+impl ContextMenuAction {
+    pub fn into_action(self, pane_id: Option<PaneId>, tab_id: Option<u64>) -> Option<Action> {
+        match self {
+            ContextMenuAction::Action(action) => Some(action),
+            ContextMenuAction::ClickedPane(action) => pane_id.map(|id| action.with_pane(id)),
+            ContextMenuAction::ClickedTab(action) => tab_id.map(|id| action.with_tab(id)),
+        }
+    }
+    pub fn keybinding_equivalent(&self) -> Vec<Action> {
+        match self {
+            ContextMenuAction::Action(action) => action.keybinding_equivalent(),
+            ContextMenuAction::ClickedPane(action) => action
+                .with_pane(PaneId::Terminal(0))
+                .keybinding_equivalent(),
+            ContextMenuAction::ClickedTab(action) => action.with_tab(0).keybinding_equivalent(),
+        }
+    }
+    pub fn as_action(&self) -> Option<&Action> {
+        match self {
+            ContextMenuAction::Action(action) => Some(action),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ContextMenuEntry {
+    Item {
+        label: String,
+        actions: Vec<ContextMenuAction>,
+        #[serde(default)]
+        toggled_label: Option<String>,
+    },
+    Separator,
+}
+
+impl ContextMenuEntry {
+    pub fn item(label: impl Into<String>, actions: Vec<ContextMenuAction>) -> Self {
+        ContextMenuEntry::Item {
+            label: label.into(),
+            actions,
+            toggled_label: None,
+        }
+    }
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            ContextMenuEntry::Item { label, .. } => Some(label.as_str()),
+            ContextMenuEntry::Separator => None,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContextMenuTarget {
+    Tab(usize),
+    Bar,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1263,6 +1885,8 @@ pub enum InputMode {
     /// `Tmux` mode allows for basic tmux keybindings functionality
     #[serde(alias = "tmux")]
     Tmux,
+    #[serde(alias = "renamesession")]
+    RenameSession,
 }
 
 impl Default for InputMode {
@@ -1446,6 +2070,7 @@ impl FromStr for InputMode {
             "scroll" | "Scroll" => Ok(InputMode::Scroll),
             "renametab" | "RenameTab" => Ok(InputMode::RenameTab),
             "renamepane" | "RenamePane" => Ok(InputMode::RenamePane),
+            "renamesession" | "RenameSession" => Ok(InputMode::RenameSession),
             "session" | "Session" => Ok(InputMode::Session),
             "move" | "Move" => Ok(InputMode::Move),
             "prompt" | "Prompt" => Ok(InputMode::Prompt),
@@ -1755,121 +2380,128 @@ pub struct MultiplayerColors {
 
 pub const DEFAULT_STYLES: Styling = Styling {
     text_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     text_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::SURFACE),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     ribbon_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_0: PaletteColor::EightBit(default_colors::RED),
-        emphasis_1: PaletteColor::EightBit(default_colors::WHITE),
-        emphasis_2: PaletteColor::EightBit(default_colors::BLUE),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::BACKGROUND),
+        background: PaletteColor::Rgb(default_colors::RIBBON),
+        emphasis_0: PaletteColor::Rgb(default_colors::WINE),
+        emphasis_1: PaletteColor::Rgb(default_colors::RIBBON_HOVER),
+        emphasis_2: PaletteColor::Rgb(default_colors::NAVY),
+        emphasis_3: PaletteColor::Rgb(default_colors::BELL),
     },
     ribbon_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_0: PaletteColor::EightBit(default_colors::RED),
-        emphasis_1: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BLUE),
-        background: PaletteColor::EightBit(default_colors::GREEN),
+        base: PaletteColor::Rgb(default_colors::BACKGROUND),
+        background: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_0: PaletteColor::Rgb(default_colors::WINE),
+        emphasis_1: PaletteColor::Rgb(default_colors::WINE),
+        emphasis_2: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_3: PaletteColor::Rgb(default_colors::BELL),
     },
     exit_code_success: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_1: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BLUE),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::GREEN),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::TEAL),
+        emphasis_1: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_2: PaletteColor::Rgb(default_colors::PINK),
+        emphasis_3: PaletteColor::Rgb(default_colors::BLUE),
     },
     exit_code_error: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::RED),
-        emphasis_0: PaletteColor::EightBit(default_colors::YELLOW),
-        emphasis_1: PaletteColor::EightBit(default_colors::GOLD),
-        emphasis_2: PaletteColor::EightBit(default_colors::SILVER),
-        emphasis_3: PaletteColor::EightBit(default_colors::PURPLE),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::ROSE),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::GOLD),
+        emphasis_1: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_2: PaletteColor::Rgb(default_colors::MUTED),
+        emphasis_3: PaletteColor::Rgb(default_colors::PURPLE),
     },
-    frame_unselected: None,
+    frame_unselected: Some(StyleDeclaration {
+        base: PaletteColor::Rgb(default_colors::DIM),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::GOLD),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::PURPLE),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
+    }),
     frame_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BROWN),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::GREEN),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::GOLD),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::PINK),
+        emphasis_3: PaletteColor::Rgb(default_colors::ORANGE),
     },
     frame_highlight: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_0: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_1: PaletteColor::EightBit(default_colors::PURPLE),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::GREEN),
-        background: PaletteColor::EightBit(default_colors::GREEN),
+        base: PaletteColor::Rgb(default_colors::GOLD),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::TEAL),
+        emphasis_1: PaletteColor::Rgb(default_colors::PURPLE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GOLD),
+        emphasis_3: PaletteColor::Rgb(default_colors::GOLD),
     },
     table_title: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::GREEN),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     table_cell_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     table_cell_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::RED),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::SURFACE),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     list_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::BACKGROUND),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     list_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::RED),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::Rgb(default_colors::FOREGROUND),
+        background: PaletteColor::Rgb(default_colors::SURFACE),
+        emphasis_0: PaletteColor::Rgb(default_colors::ORANGE),
+        emphasis_1: PaletteColor::Rgb(default_colors::BLUE),
+        emphasis_2: PaletteColor::Rgb(default_colors::GREEN),
+        emphasis_3: PaletteColor::Rgb(default_colors::VIOLET),
     },
     multiplayer_user_colors: MultiplayerColors {
-        player_1: PaletteColor::EightBit(default_colors::MAGENTA),
-        player_2: PaletteColor::EightBit(default_colors::BLUE),
-        player_3: PaletteColor::EightBit(default_colors::PURPLE),
-        player_4: PaletteColor::EightBit(default_colors::YELLOW),
-        player_5: PaletteColor::EightBit(default_colors::CYAN),
-        player_6: PaletteColor::EightBit(default_colors::GOLD),
-        player_7: PaletteColor::EightBit(default_colors::RED),
-        player_8: PaletteColor::EightBit(default_colors::SILVER),
-        player_9: PaletteColor::EightBit(default_colors::PINK),
-        player_10: PaletteColor::EightBit(default_colors::BROWN),
+        player_1: PaletteColor::Rgb(default_colors::PINK),
+        player_2: PaletteColor::Rgb(default_colors::BLUE),
+        player_3: PaletteColor::Rgb(default_colors::PURPLE),
+        player_4: PaletteColor::Rgb(default_colors::GOLD),
+        player_5: PaletteColor::Rgb(default_colors::TEAL),
+        player_6: PaletteColor::Rgb(default_colors::ORANGE),
+        player_7: PaletteColor::Rgb(default_colors::ROSE),
+        player_8: PaletteColor::Rgb(default_colors::MUTED),
+        player_9: PaletteColor::Rgb(default_colors::GREEN),
+        player_10: PaletteColor::Rgb(default_colors::SAND),
     },
 };
 
@@ -2062,6 +2694,8 @@ pub struct ModeInfo {
     pub nested_ascend_keys: Vec<KeyWithModifier>,
     pub session_ascended: Option<bool>,
     pub nested_descend_keys: Vec<KeyWithModifier>,
+    #[serde(default)]
+    pub remote_client: Option<String>,
 }
 
 impl ModeInfo {
@@ -2126,6 +2760,8 @@ pub struct SessionInfo {
     pub tab_history: BTreeMap<ClientId, Vec<usize>>,
     pub pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     pub creation_time: Duration,
+    #[serde(default)]
+    pub attention_muted: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -2149,6 +2785,55 @@ pub enum LayoutInfo {
     File(String, LayoutMetadata),
     Url(String),
     Stringified(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
+pub enum KeybindPresetSource {
+    #[default]
+    BuiltIn,
+    Folder,
+    File,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct KeybindPresetInfo {
+    pub name: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub source: KeybindPresetSource,
+    pub placeholders: Vec<String>,
+    pub path: Option<String>,
+    pub examples: Vec<(String, String)>,
+}
+
+impl KeybindPresetInfo {
+    pub fn uses_placeholder(&self, placeholder: &str) -> bool {
+        self.placeholders.iter().any(|p| p == placeholder)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct KeybindPresetWithError {
+    pub name: String,
+    pub path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct KeybindsSelectionSnapshot {
+    pub preset: Option<String>,
+    pub primary: Option<String>,
+    pub secondary: Option<String>,
+    pub unlock: Option<String>,
+    pub clears_defaults: bool,
+    pub has_own_keybindings: bool,
+    pub has_own_mousebindings: bool,
+    pub active: KeybindPresetInfo,
+    pub active_values: BTreeMap<String, String>,
+    pub error: Option<String>,
+    pub set_by_layout: bool,
+    pub default_mode: Option<InputMode>,
+    pub set_on_command_line: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -2605,6 +3290,7 @@ pub struct TabInfo {
     pub has_bell_notification: bool,
     /// Whether this tab is currently flashing its bell (transient 400ms state)
     pub is_flashing_bell: bool,
+    pub attention: crate::attention::TabAttention,
 }
 
 /// The `PaneManifest` contains a dictionary of panes, indexed by the tab position (0 indexed).
@@ -2640,6 +3326,7 @@ pub struct PaneInfo {
     /// Whether a pane is suppressed - suppressed panes are not visible to the user, but still run
     /// in the background
     pub is_suppressed: bool,
+    pub is_collapsed: bool,
     /// The full title of the pane as it appears in the UI (if there is room for it)
     pub title: String,
     /// Whether a pane exited or not, note that most panes close themselves before setting this
@@ -2678,6 +3365,9 @@ pub struct PaneInfo {
     /// The default background color of this pane, if set (e.g. "#001a3a")
     pub default_bg: Option<String>,
     pub nested_session_name: Option<String>,
+    pub attention: crate::attention::PaneAttention,
+    pub command_state: crate::attention::CommandState,
+    pub program_status: Vec<crate::attention::ProgramStatusRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -2769,76 +3459,36 @@ pub struct PaneContents {
     pub cursor: Option<(usize, usize)>,
 }
 
-/// Extract text from a line between two column positions, accounting for wide characters
 fn extract_text_by_columns(line: &str, start_col: usize, end_col: usize) -> String {
     let mut current_col = 0;
     let mut result = String::new();
-    let mut capturing = false;
-
+    let mut capturing_current = false;
     for ch in line.chars() {
         let char_width = ch.width().unwrap_or(0);
-
-        // Start capturing when we reach start_col
-        if current_col >= start_col && !capturing {
-            capturing = true;
+        if char_width == 0 {
+            if capturing_current {
+                result.push(ch);
+            }
+            continue;
         }
-
-        // Stop if we've reached or passed end_col
+        capturing_current = current_col >= start_col && current_col < end_col;
         if current_col >= end_col {
             break;
         }
-
-        // Capture character if we're in the range
-        if capturing {
+        if capturing_current {
             result.push(ch);
         }
-
         current_col += char_width;
     }
-
     result
 }
 
-/// Extract text from a line starting at a column position, accounting for wide characters
 fn extract_text_from_column(line: &str, start_col: usize) -> String {
-    let mut current_col = 0;
-    let mut result = String::new();
-    let mut capturing = false;
-
-    for ch in line.chars() {
-        let char_width = ch.width().unwrap_or(0);
-
-        if current_col >= start_col {
-            capturing = true;
-        }
-
-        if capturing {
-            result.push(ch);
-        }
-
-        current_col += char_width;
-    }
-
-    result
+    extract_text_by_columns(line, start_col, usize::MAX)
 }
 
-/// Extract text from a line up to a column position, accounting for wide characters
 fn extract_text_to_column(line: &str, end_col: usize) -> String {
-    let mut current_col = 0;
-    let mut result = String::new();
-
-    for ch in line.chars() {
-        let char_width = ch.width().unwrap_or(0);
-
-        if current_col >= end_col {
-            break;
-        }
-
-        result.push(ch);
-        current_col += char_width;
-    }
-
-    result
+    extract_text_by_columns(line, 0, end_col)
 }
 
 impl PaneContents {
@@ -3235,6 +3885,126 @@ pub enum PaneId {
     Plugin(u32),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HostId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PaneAddress {
+    pub host: Option<HostId>,
+    pub session: String,
+    pub pane_id: PaneId,
+}
+
+impl PaneAddress {
+    pub fn local(session: impl Into<String>, pane_id: PaneId) -> Self {
+        PaneAddress {
+            host: None,
+            session: session.into(),
+            pane_id,
+        }
+    }
+    pub fn is_local(&self) -> bool {
+        self.host.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MirrorClosedReason {
+    PaneClosed,
+    PaneNotFound,
+    SessionEnding,
+    Rejected,
+    VersionMismatch,
+    UnsupportedHost,
+    ConnectionFailed,
+    ConnectionLost,
+    ProtocolError,
+    ContainsViewer,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MirrorState {
+    #[default]
+    NoTarget,
+    Connecting,
+    Live,
+    Closed(MirrorClosedReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveView {
+    pub target: PaneAddress,
+    pub x: usize,
+    pub y: usize,
+    pub cols: usize,
+    pub rows: usize,
+    pub resize_allowed: Option<bool>,
+    pub view_only: bool,
+}
+
+impl LiveView {
+    pub fn new(target: PaneAddress, x: usize, y: usize, cols: usize, rows: usize) -> Self {
+        LiveView {
+            target,
+            x,
+            y,
+            cols,
+            rows,
+            resize_allowed: None,
+            view_only: false,
+        }
+    }
+}
+
+pub const DEFAULT_LIVE_VIEW_RELEASE_KEY: &str = "F9";
+pub const LIVE_VIEW_DOUBLE_PRESS_MS: u64 = 400;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveViewReleaseGesture {
+    pub key: KeyWithModifier,
+    pub double: bool,
+}
+
+impl LiveViewReleaseGesture {
+    pub fn parse(text: &str) -> Option<Self> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return None;
+        }
+        if words.len() % 2 == 0 {
+            let (first, second) = words.split_at(words.len() / 2);
+            if first == second {
+                if let Ok(key) = first.join(" ").parse::<KeyWithModifier>() {
+                    return Some(LiveViewReleaseGesture { key, double: true });
+                }
+            }
+        }
+        words
+            .join(" ")
+            .parse::<KeyWithModifier>()
+            .ok()
+            .map(|key| LiveViewReleaseGesture { key, double: false })
+    }
+
+    pub fn display(text: &str) -> String {
+        match Self::parse(text) {
+            Some(gesture) if gesture.double => format!("<{}> twice", gesture.key),
+            Some(gesture) => format!("<{}>", gesture.key),
+            None => format!("<{}>", text.trim()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LiveViewRelease {
+    Key,
+    ClickOutside,
+    FocusLost,
+    Plugin,
+    Cleared,
+    NotAllowed,
+}
+
 impl Default for PaneId {
     fn default() -> Self {
         PaneId::Terminal(0)
@@ -3345,12 +4115,50 @@ impl MessageToPlugin {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionWindowRequest {
+    pub session_name: Option<String>,
+    pub new_window: bool,
+    pub pane_id: Option<PaneId>,
+    pub layout: Option<LayoutInfo>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl SessionWindowRequest {
+    pub fn existing(session_name: &str, pane_id: Option<PaneId>, new_window: bool) -> Self {
+        SessionWindowRequest {
+            session_name: Some(session_name.to_owned()),
+            new_window,
+            pane_id,
+            ..Default::default()
+        }
+    }
+    pub fn new_session(
+        session_name: Option<&str>,
+        layout: Option<LayoutInfo>,
+        cwd: Option<PathBuf>,
+    ) -> Self {
+        SessionWindowRequest {
+            session_name: session_name.map(|n| n.to_owned()),
+            new_window: true,
+            layout,
+            cwd,
+            ..Default::default()
+        }
+    }
+    pub fn creates_a_session(&self) -> bool {
+        self.session_name.is_none() || self.layout.is_some()
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectToSession {
     pub name: Option<String>,
     pub tab_position: Option<usize>,
     pub pane_id: Option<(u32, bool)>, // (id, is_plugin)
     pub layout: Option<LayoutInfo>,
     pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub switch_context: Option<crate::session_history::SwitchContext>,
 }
 
 impl ConnectToSession {
@@ -3360,6 +4168,15 @@ impl ConnectToSession {
                 .to_string_lossy()
                 .to_string();
         }
+    }
+    pub fn startup_card(&self) -> Option<crate::input::attention::StartupCard> {
+        self.switch_context.as_ref().and_then(|c| c.startup_card)
+    }
+    pub fn disconnects_others(&self) -> bool {
+        self.switch_context
+            .as_ref()
+            .map(|c| c.disconnect_others)
+            .unwrap_or(false)
     }
 }
 
@@ -3400,6 +4217,129 @@ pub enum PipeSource {
     Cli(String), // String is the pipe_id of the CLI pipe (used for blocking/unblocking)
     Plugin(u32), // u32 is the lugin id
     Keybind,     // TODO: consider including the actual keybind here?
+    PromptRequest {
+        caller_plugin_id: u32,
+        request_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum PopupCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PopupCorner {
+    pub fn is_top(&self) -> bool {
+        matches!(self, PopupCorner::TopLeft | PopupCorner::TopRight)
+    }
+    pub fn is_left(&self) -> bool {
+        matches!(self, PopupCorner::TopLeft | PopupCorner::BottomLeft)
+    }
+}
+
+impl FromStr for PopupCorner {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "top-left" => Ok(PopupCorner::TopLeft),
+            "top-right" => Ok(PopupCorner::TopRight),
+            "bottom-left" => Ok(PopupCorner::BottomLeft),
+            "bottom-right" => Ok(PopupCorner::BottomRight),
+            other => Err(format!(
+                "invalid popup corner '{}', expected one of: top-left, top-right, bottom-left, bottom-right",
+                other
+            )),
+        }
+    }
+}
+
+impl fmt::Display for PopupCorner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PopupCorner::TopLeft => write!(f, "top-left"),
+            PopupCorner::TopRight => write!(f, "top-right"),
+            PopupCorner::BottomLeft => write!(f, "bottom-left"),
+            PopupCorner::BottomRight => write!(f, "bottom-right"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct PopupOptions {
+    pub focused: bool,
+    pub corner: Option<PopupCorner>,
+}
+
+impl Default for PopupOptions {
+    fn default() -> Self {
+        PopupOptions {
+            focused: true,
+            corner: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
+pub enum PipePopupPlacement {
+    #[default]
+    Pane,
+    Center,
+    Mouse,
+    Cursor,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PipePopupPlacement {
+    pub fn corner(&self) -> Option<PopupCorner> {
+        match self {
+            PipePopupPlacement::TopLeft => Some(PopupCorner::TopLeft),
+            PipePopupPlacement::TopRight => Some(PopupCorner::TopRight),
+            PipePopupPlacement::BottomLeft => Some(PopupCorner::BottomLeft),
+            PipePopupPlacement::BottomRight => Some(PopupCorner::BottomRight),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for PipePopupPlacement {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "pane" => Ok(PipePopupPlacement::Pane),
+            "center" | "centre" => Ok(PipePopupPlacement::Center),
+            "mouse" => Ok(PipePopupPlacement::Mouse),
+            "cursor" => Ok(PipePopupPlacement::Cursor),
+            "top-left" => Ok(PipePopupPlacement::TopLeft),
+            "top-right" => Ok(PipePopupPlacement::TopRight),
+            "bottom-left" => Ok(PipePopupPlacement::BottomLeft),
+            "bottom-right" => Ok(PipePopupPlacement::BottomRight),
+            other => Err(format!(
+                "invalid popup placement '{}', expected one of: pane, center, mouse, cursor, top-left, top-right, bottom-left, bottom-right",
+                other
+            )),
+        }
+    }
+}
+
+impl fmt::Display for PipePopupPlacement {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PipePopupPlacement::Pane => write!(f, "pane"),
+            PipePopupPlacement::Center => write!(f, "center"),
+            PipePopupPlacement::Mouse => write!(f, "mouse"),
+            PipePopupPlacement::Cursor => write!(f, "cursor"),
+            PipePopupPlacement::TopLeft => write!(f, "top-left"),
+            PipePopupPlacement::TopRight => write!(f, "top-right"),
+            PipePopupPlacement::BottomLeft => write!(f, "bottom-left"),
+            PipePopupPlacement::BottomRight => write!(f, "bottom-right"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3941,6 +4881,7 @@ pub enum PluginCommand {
     UnblockCliPipeInput(String),   // String => pipe name
     BlockCliPipeInput(String),     // String => pipe name
     CliPipeOutput(String, String), // String => pipe name, String => output
+    SetCliPipeExitCode(String, i32),
     MessageToPlugin(MessageToPlugin),
     DisconnectOtherClients,
     KillSessions(Vec<String>), // one or more session names
@@ -4043,6 +4984,10 @@ pub enum PluginCommand {
     EmbedMultiplePanes(Vec<PaneId>),
     QueryWebServerStatus,
     SetSelfMouseSelectionSupport(bool),
+    /// Give this plugin's own row or column in the layout back to its neighbors while it has
+    /// nothing to draw, and take it again when it does. The pane keeps its place in the layout
+    /// the whole time, so expanding restores exactly the size the layout asked for.
+    SetSelfCollapsed(bool),
     GenerateWebLoginToken(Option<String>, bool), // (token_label, read_only)
     RevokeWebLoginToken(String), // String -> token id (provided name or generated id)
     ListWebLoginTokens,
@@ -4124,6 +5069,650 @@ pub enum PluginCommand {
     HideSlot(SlotId),
     ShowSlot(SlotId, bool),
     CloseSlot(SlotId),
+    SetCollapsedSlot(SlotId, bool),
+    OpenContextMenu {
+        target: ContextMenuTarget,
+        line: usize,
+        column: usize,
+    },
+    OpenPluginPopup {
+        plugin_url: String,
+        configuration: BTreeMap<String, String>,
+        line: usize,
+        column: usize,
+        width: usize,
+        height: usize,
+        options: PopupOptions,
+    },
+    SetPopupSize {
+        width: usize,
+        height: usize,
+    },
+    RunContextMenuItem(usize),
+    ReadConfig,
+    RevertConfig(Option<SettingKey>),
+    UnsetConfigSetting(SettingKey),
+    SaveConfig,
+    OverwriteConfigFile,
+    ReloadConfigFile,
+    CopyKeybindPreset {
+        preset: String,
+        new_name: String,
+    },
+    ReplaceConfigBlocks(String),
+    SaveKeybindsAsPreset {
+        new_name: String,
+    },
+    WriteThemeFile {
+        name: String,
+        copy_from: Option<String>,
+        colours: Vec<String>,
+    },
+    DeleteThemeFile {
+        name: String,
+    },
+    ResetKeys {
+        keys: Vec<(InputMode, KeyWithModifier)>,
+        write_config_to_disk: bool,
+    },
+    ResetMousebinds {
+        triggers: Vec<(InputMode, MouseTrigger)>,
+        write_config_to_disk: bool,
+    },
+    Prompt {
+        request_id: u64,
+        request: crate::prompt::PromptRequest,
+    },
+    ReplyToPrompt {
+        request_id: u64,
+        result: crate::prompt::PromptResult,
+    },
+    GetSessionSuggestions {
+        limit: usize,
+    },
+    SetPopupFocused(bool),
+    PopupToFloatingPane(Option<FloatingPaneCoordinates>),
+    SwitchSessionAndCloseCurrent(ConnectToSession),
+    GetSessionPreview {
+        name: String,
+        tab_index: Option<usize>,
+        pane_id: Option<(u32, bool)>,
+        anchor: Option<PreviewAnchor>,
+    },
+    GetSavedSessionPreview(String),
+    DesktopIntegration(String),
+    MarkSessionPaneSeen {
+        session_name: String,
+        pane_id: PaneId,
+    },
+    MarkAllSeen {
+        session_name: Option<String>,
+    },
+    OpenSessionWindow(SessionWindowRequest),
+    WriteToSessionPane {
+        session_name: String,
+        pane_id: PaneId,
+        bytes: Vec<u8>,
+    },
+    SendKeyToSessionPane {
+        session_name: String,
+        pane_id: PaneId,
+        key: KeyWithModifier,
+    },
+    ToggleSessionPaneMute {
+        session_name: String,
+        pane_id: PaneId,
+    },
+    ToggleSessionPaneIgnoreOutput {
+        session_name: String,
+        pane_id: PaneId,
+    },
+    ToggleSessionPaneWatch {
+        session_name: String,
+        pane_id: PaneId,
+    },
+    FocusSessionPane {
+        session_name: String,
+        pane_id: PaneId,
+    },
+    SetLiveView(Option<LiveView>),
+    SetLiveViewInput(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SettingSection {
+    TopLevel,
+    PaneFrames,
+    WebClient,
+    Window,
+    WindowTheme,
+    Keybinds,
+    Blocks,
+    Attention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SettingValueShape {
+    Flag,
+    Number,
+    Decimal,
+    Text,
+    List,
+    Colour,
+}
+
+pub const SETTING_LIST_SEPARATOR: &str = ", ";
+
+pub fn split_setting_list(text: &str) -> Vec<String> {
+    text.split(SETTING_LIST_SEPARATOR)
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_owned())
+        .collect()
+}
+
+pub fn join_setting_list<S: AsRef<str>>(items: &[S]) -> String {
+    items
+        .iter()
+        .map(|item| item.as_ref())
+        .collect::<Vec<_>>()
+        .join(SETTING_LIST_SEPARATOR)
+}
+
+macro_rules! setting_keys {
+    ($($variant:ident => ($section:ident, $kdl_name:literal, $requires_restart:literal, $shape:ident)),* $(,)?) => {
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, EnumIter,
+        )]
+        pub enum SettingKey {
+            $($variant),*
+        }
+        impl SettingKey {
+            pub fn kdl_name(&self) -> &'static str {
+                match self {
+                    $(SettingKey::$variant => $kdl_name),*
+                }
+            }
+            pub fn section(&self) -> SettingSection {
+                match self {
+                    $(SettingKey::$variant => SettingSection::$section),*
+                }
+            }
+            pub fn requires_restart(&self) -> bool {
+                match self {
+                    $(SettingKey::$variant => $requires_restart),*
+                }
+            }
+            pub fn value_shape(&self) -> SettingValueShape {
+                match self {
+                    $(SettingKey::$variant => SettingValueShape::$shape),*
+                }
+            }
+        }
+    };
+}
+
+setting_keys! {
+    SimplifiedUi => (TopLevel, "simplified_ui", false, Flag),
+    Theme => (TopLevel, "theme", false, Text),
+    ThemeDark => (TopLevel, "theme_dark", false, Text),
+    ThemeLight => (TopLevel, "theme_light", false, Text),
+    ExplicitThemeHue => (TopLevel, "explicit_theme_hue", false, Text),
+    DefaultMode => (TopLevel, "default_mode", false, Text),
+    DefaultShell => (TopLevel, "default_shell", false, Text),
+    DefaultCwd => (TopLevel, "default_cwd", false, Text),
+    DefaultLayout => (TopLevel, "default_layout", true, Text),
+    LayoutDir => (TopLevel, "layout_dir", false, Text),
+    ThemeDir => (TopLevel, "theme_dir", false, Text),
+    KeybindsDir => (TopLevel, "keybinds_dir", false, Text),
+    MouseMode => (TopLevel, "mouse_mode", true, Flag),
+    PaneFrames => (TopLevel, "pane_frames", false, Flag),
+    PaneFrameStyle => (TopLevel, "pane_frame_style", false, Text),
+    MirrorSession => (TopLevel, "mirror_session", true, Flag),
+    OnForceClose => (TopLevel, "on_force_close", true, Text),
+    ScrollBufferSize => (TopLevel, "scroll_buffer_size", true, Number),
+    CopyCommand => (TopLevel, "copy_command", false, Text),
+    CopyClipboard => (TopLevel, "copy_clipboard", false, Text),
+    CopyOnSelect => (TopLevel, "copy_on_select", false, Flag),
+    Osc8Hyperlinks => (TopLevel, "osc8_hyperlinks", true, Flag),
+    ScrollbackEditor => (TopLevel, "scrollback_editor", false, Text),
+    SessionName => (TopLevel, "session_name", true, Text),
+    AttachToSession => (TopLevel, "attach_to_session", true, Flag),
+    AutoLayout => (TopLevel, "auto_layout", false, Flag),
+    SessionSerialization => (TopLevel, "session_serialization", true, Flag),
+    SerializePaneViewport => (TopLevel, "serialize_pane_viewport", true, Flag),
+    ScrollbackLinesToSerialize => (TopLevel, "scrollback_lines_to_serialize", true, Number),
+    StyledUnderlines => (TopLevel, "styled_underlines", true, Flag),
+    SerializationInterval => (TopLevel, "serialization_interval", true, Number),
+    DisableSessionMetadata => (TopLevel, "disable_session_metadata", true, Flag),
+    SupportKittyKeyboardProtocol => (TopLevel, "support_kitty_keyboard_protocol", true, Flag),
+    SupportKittyGraphicsProtocol => (TopLevel, "support_kitty_graphics_protocol", true, Flag),
+    GraphemeClusters => (TopLevel, "grapheme_clusters", false, Flag),
+    MirrorResizesSourcePane => (TopLevel, "mirror_resizes_source_pane", false, Flag),
+    LiveViewReleaseKey => (TopLevel, "live_view_release_key", false, Text),
+    WebServer => (TopLevel, "web_server", true, Flag),
+    WebSharing => (TopLevel, "web_sharing", true, Text),
+    StackedResize => (TopLevel, "stacked_resize", false, Flag),
+    StackedPaneList => (TopLevel, "stacked_pane_list", false, Flag),
+    ShowStartupTips => (TopLevel, "show_startup_tips", true, Flag),
+    ShowReleaseNotes => (TopLevel, "show_release_notes", true, Flag),
+    AdvancedMouseActions => (TopLevel, "advanced_mouse_actions", false, Flag),
+    MouseScrollResize => (TopLevel, "mouse_scroll_resize", false, Flag),
+    ScrollModeSync => (TopLevel, "scroll_mode_sync", false, Flag),
+    MouseHoverEffects => (TopLevel, "mouse_hover_effects", false, Flag),
+    MouseHoverTips => (TopLevel, "mouse_hover_tips", false, Flag),
+    VisualBell => (TopLevel, "visual_bell", false, Flag),
+    FocusFollowsMouse => (TopLevel, "focus_follows_mouse", false, Flag),
+    MouseClickThrough => (TopLevel, "mouse_click_through", false, Flag),
+    ContextMenuEnabled => (TopLevel, "context_menu_enabled", false, Flag),
+    Osc133CommandSelection => (TopLevel, "osc133_command_selection", false, Flag),
+    WordSeparators => (TopLevel, "word_separators", false, Text),
+    HostNotificationProtocol => (TopLevel, "host_notification_protocol", false, Text),
+    WebServerIp => (TopLevel, "web_server_ip", true, Text),
+    WebServerPort => (TopLevel, "web_server_port", true, Number),
+    WebServerCert => (TopLevel, "web_server_cert", true, Text),
+    WebServerKey => (TopLevel, "web_server_key", true, Text),
+    EnforceHttpsForLocalhost => (TopLevel, "enforce_https_for_localhost", true, Flag),
+    DangerouslyAllowWebServingWithoutACertificate => (TopLevel, "dangerously_allow_web_serving_without_a_certificate", true, Flag),
+    PostCommandDiscoveryHook => (TopLevel, "post_command_discovery_hook", false, Text),
+    ClientAsyncWorkerTasks => (TopLevel, "client_async_worker_tasks", true, Number),
+    NestedSessionHandling => (TopLevel, "nested_session_handling", false, Text),
+    DangerouslyEnablePasteBufferRead => (TopLevel, "dangerously_enable_paste_buffer_read", false, Flag),
+    SessionIndicator => (TopLevel, "session_indicator", false, Flag),
+    SwapLayoutNotification => (TopLevel, "swap_layout_notification", false, Flag),
+    OnQuit => (TopLevel, "on_quit", false, Text),
+    FrameRoundedCorners => (PaneFrames, "rounded_corners", false, Flag),
+    FrameHideSessionName => (PaneFrames, "hide_session_name", false, Flag),
+    FrameBorderStyle => (PaneFrames, "border_style", false, Text),
+    FrameBorderTop => (PaneFrames, "border_top", false, Text),
+    FrameBorderRight => (PaneFrames, "border_right", false, Text),
+    FrameBorderBottom => (PaneFrames, "border_bottom", false, Text),
+    FrameBorderLeft => (PaneFrames, "border_left", false, Text),
+    FrameBorderRoundedCorners => (PaneFrames, "border_rounded_corners", false, Flag),
+    FrameFloatingBorderStyle => (PaneFrames, "floating_border_style", false, Text),
+    FrameFloatingBorderTop => (PaneFrames, "floating_border_top", false, Text),
+    FrameFloatingBorderRight => (PaneFrames, "floating_border_right", false, Text),
+    FrameFloatingBorderBottom => (PaneFrames, "floating_border_bottom", false, Text),
+    FrameFloatingBorderLeft => (PaneFrames, "floating_border_left", false, Text),
+    FrameFloatingBorderRoundedCorners => (PaneFrames, "floating_border_rounded_corners", false, Flag),
+    WebClientFont => (WebClient, "font", true, Text),
+    WebClientFontSize => (WebClient, "font_size", true, Number),
+    WebClientCursorBlink => (WebClient, "cursor_blink", true, Flag),
+    WebClientCursorStyle => (WebClient, "cursor_style", true, Text),
+    WebClientCursorInactiveStyle => (WebClient, "cursor_inactive_style", true, Text),
+    WebClientMacOptionIsMeta => (WebClient, "mac_option_is_meta", true, Flag),
+    WebClientBaseUrl => (WebClient, "base_url", true, Text),
+    WindowFont => (Window, "font", false, Text),
+    WindowFontSize => (Window, "font_size", false, Decimal),
+    WindowFontWeight => (Window, "font_weight", false, Number),
+    WindowSystemFonts => (Window, "system_fonts", false, Flag),
+    WindowLigatures => (Window, "ligatures", false, Flag),
+    WindowFontFeatures => (Window, "font_features", false, List),
+    WindowCursorStyle => (Window, "cursor_style", false, Text),
+    WindowCursorBlink => (Window, "cursor_blink", false, Flag),
+    WindowCursorUnfocusedHollow => (Window, "cursor_unfocused_hollow", false, Flag),
+    WindowStartupMode => (Window, "startup_mode", true, Text),
+    WindowTerminalRequests => (Window, "terminal_requests", false, Text),
+    WindowInitialColumns => (Window, "initial_columns", true, Number),
+    WindowInitialRows => (Window, "initial_rows", true, Number),
+    WindowOpacity => (Window, "opacity", false, Decimal),
+    WindowOpacityMode => (Window, "opacity_mode", false, Text),
+    WindowBlur => (Window, "blur", false, Flag),
+    WindowPadding => (Window, "padding", false, Decimal),
+    WindowPaddingTop => (Window, "padding_top", false, Decimal),
+    WindowPaddingRight => (Window, "padding_right", false, Decimal),
+    WindowPaddingBottom => (Window, "padding_bottom", false, Decimal),
+    WindowPaddingLeft => (Window, "padding_left", false, Decimal),
+    WindowPaddingBalance => (Window, "padding_balance", false, Flag),
+    WindowPaddingColor => (Window, "padding_color", false, Text),
+    WindowLineHeight => (Window, "line_height", false, Decimal),
+    WindowCellWidth => (Window, "cell_width", false, Decimal),
+    WindowBaselineOffset => (Window, "baseline_offset", false, Number),
+    WindowUnderlineOffset => (Window, "underline_offset", false, Number),
+    WindowUnderlineThickness => (Window, "underline_thickness", false, Number),
+    WindowMinimumContrast => (Window, "minimum_contrast", false, Decimal),
+    WindowSmoothScrolling => (Window, "smooth_scrolling", false, Flag),
+    WindowScrollAnimationDuration => (Window, "scroll_animation_duration", false, Number),
+    WindowScrollMomentum => (Window, "scroll_momentum", false, Flag),
+    WindowScrollMomentumFriction => (Window, "scroll_momentum_friction", false, Decimal),
+    WindowBell => (Window, "bell", false, Text),
+    WindowOpenLinks => (Window, "open_links", false, Flag),
+    WindowOpenLinksWithShift => (Window, "open_links_with_shift", false, Flag),
+    WindowShiftDragSelects => (Window, "shift_drag_selects", false, Flag),
+    WindowReuseSessionWindows => (Window, "reuse_session_windows", false, Flag),
+    WindowMiddleClickPaste => (Window, "middle_click_paste", false, Flag),
+    WindowHidePointerWhileTyping => (Window, "hide_pointer_while_typing", false, Flag),
+    WindowMacosOptionAsAlt => (Window, "macos_option_as_alt", false, Text),
+    WindowPasteKeys => (Window, "paste_keys", false, List),
+    WindowCopyKeys => (Window, "copy_keys", false, List),
+    WindowZoomInKeys => (Window, "zoom_in_keys", false, List),
+    WindowZoomOutKeys => (Window, "zoom_out_keys", false, List),
+    WindowZoomResetKeys => (Window, "zoom_reset_keys", false, List),
+    WindowFullscreenKeys => (Window, "fullscreen_keys", false, List),
+    WindowColorForeground => (WindowTheme, "foreground", false, Colour),
+    WindowColorBackground => (WindowTheme, "background", false, Colour),
+    WindowColorCursor => (WindowTheme, "cursor", false, Colour),
+    WindowColorBlack => (WindowTheme, "black", false, Colour),
+    WindowColorRed => (WindowTheme, "red", false, Colour),
+    WindowColorGreen => (WindowTheme, "green", false, Colour),
+    WindowColorYellow => (WindowTheme, "yellow", false, Colour),
+    WindowColorBlue => (WindowTheme, "blue", false, Colour),
+    WindowColorMagenta => (WindowTheme, "magenta", false, Colour),
+    WindowColorCyan => (WindowTheme, "cyan", false, Colour),
+    WindowColorWhite => (WindowTheme, "white", false, Colour),
+    WindowColorBrightBlack => (WindowTheme, "bright_black", false, Colour),
+    WindowColorBrightRed => (WindowTheme, "bright_red", false, Colour),
+    WindowColorBrightGreen => (WindowTheme, "bright_green", false, Colour),
+    WindowColorBrightYellow => (WindowTheme, "bright_yellow", false, Colour),
+    WindowColorBrightBlue => (WindowTheme, "bright_blue", false, Colour),
+    WindowColorBrightMagenta => (WindowTheme, "bright_magenta", false, Colour),
+    WindowColorBrightCyan => (WindowTheme, "bright_cyan", false, Colour),
+    WindowColorBrightWhite => (WindowTheme, "bright_white", false, Colour),
+    Keybinds => (Keybinds, "keybinds", false, Text),
+    Mousebinds => (Keybinds, "mousebinds", false, Text),
+    PluginAliases => (Blocks, "plugins", false, Text),
+    LoadPlugins => (Blocks, "load_plugins", true, Text),
+    Env => (Blocks, "env", true, Text),
+    Themes => (Blocks, "themes", false, Text),
+    ContextMenu => (Blocks, "context_menu", false, Text),
+    AttentionFrameMarkers => (Attention, "frame_markers", false, Flag),
+    AttentionHostStatus => (Attention, "host_status", false, Flag),
+    AttentionTabMarkers => (Attention, "tab_markers", false, Flag),
+    AttentionIdleRule => (Attention, "idle_rule", false, Text),
+    AttentionDoneThresholdSecs => (Attention, "done_threshold_secs", false, Number),
+    AttentionIdleActivitySecs => (Attention, "idle_activity_secs", false, Number),
+    AttentionIdleSilenceSecs => (Attention, "idle_silence_secs", false, Number),
+    AttentionStartupCard => (Attention, "startup_card", false, Text),
+    AttentionTrayIcon => (Attention, "tray_icon", false, Flag),
+    AttentionDesktopNotifications => (Attention, "desktop_notifications", false, Text),
+    AttentionNotificationDetails => (Attention, "notification_details", false, Flag),
+}
+
+impl SettingKey {
+    pub fn all() -> Vec<SettingKey> {
+        use strum::IntoEnumIterator;
+        SettingKey::iter().collect()
+    }
+    pub fn id(&self) -> String {
+        match self.section() {
+            SettingSection::TopLevel | SettingSection::Keybinds | SettingSection::Blocks => {
+                self.kdl_name().to_owned()
+            },
+            SettingSection::PaneFrames => format!("ui.pane_frames.{}", self.kdl_name()),
+            SettingSection::WebClient => format!("web_client.{}", self.kdl_name()),
+            SettingSection::Window => format!("window.{}", self.kdl_name()),
+            SettingSection::WindowTheme => format!("window.theme.{}", self.kdl_name()),
+            SettingSection::Attention => format!("attention.{}", self.kdl_name()),
+        }
+    }
+    pub fn from_id(id: &str) -> Option<SettingKey> {
+        SettingKey::all().into_iter().find(|key| key.id() == id)
+    }
+    pub fn parent_nodes(&self) -> &'static [&'static str] {
+        match self.section() {
+            SettingSection::TopLevel | SettingSection::Keybinds | SettingSection::Blocks => &[],
+            SettingSection::PaneFrames => &["ui", "pane_frames"],
+            SettingSection::WebClient => &["web_client"],
+            SettingSection::Window => &["window"],
+            SettingSection::WindowTheme => &["window", "theme"],
+            SettingSection::Attention => &["attention"],
+        }
+    }
+    pub fn is_window(&self) -> bool {
+        matches!(
+            self.section(),
+            SettingSection::Window | SettingSection::WindowTheme
+        )
+    }
+    pub fn is_block(&self) -> bool {
+        matches!(
+            self.section(),
+            SettingSection::Keybinds | SettingSection::Blocks
+        )
+    }
+    pub fn kdl_values(&self, value: &str) -> Option<Vec<kdl::KdlValue>> {
+        match self.value_shape() {
+            SettingValueShape::Flag => match value {
+                "true" => Some(vec![kdl::KdlValue::Bool(true)]),
+                "false" => Some(vec![kdl::KdlValue::Bool(false)]),
+                _ => None,
+            },
+            SettingValueShape::Number => value
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .map(|number| vec![kdl::KdlValue::Base10(number)]),
+            SettingValueShape::Decimal => {
+                let number = value.trim().parse::<f64>().ok()?;
+                if !number.is_finite() {
+                    return None;
+                }
+                if number.fract() == 0.0 && number.abs() < i64::MAX as f64 {
+                    Some(vec![kdl::KdlValue::Base10(number as i64)])
+                } else {
+                    Some(vec![kdl::KdlValue::Base10Float(number)])
+                }
+            },
+            SettingValueShape::Text => Some(vec![kdl::KdlValue::String(value.to_owned())]),
+            SettingValueShape::List => {
+                let items: Vec<kdl::KdlValue> = split_setting_list(value)
+                    .into_iter()
+                    .map(kdl::KdlValue::String)
+                    .collect();
+                if items.is_empty() {
+                    None
+                } else {
+                    Some(items)
+                }
+            },
+            SettingValueShape::Colour => {
+                let text = value.trim();
+                if text.starts_with('#') {
+                    Some(vec![kdl::KdlValue::String(text.to_owned())])
+                } else {
+                    text.parse::<u8>()
+                        .ok()
+                        .map(|index| vec![kdl::KdlValue::Base10(index as i64)])
+                }
+            },
+        }
+    }
+    pub fn kdl_snippet(&self, value: &str) -> String {
+        let value_text = self
+            .kdl_values(value)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| kdl::KdlValue::String(value.to_owned()).to_string());
+        let mut text = format!("{} {}", self.kdl_name(), value_text);
+        for parent in self.parent_nodes().iter().rev() {
+            let inner = text
+                .lines()
+                .map(|line| format!("    {}", line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            text = format!("{} {{\n{}\n}}", parent, inner);
+        }
+        text
+    }
+}
+
+impl fmt::Display for SettingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.id())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSettingState {
+    pub key: SettingKey,
+    pub saved_value: Option<String>,
+    pub current_value: Option<String>,
+    pub set_in_file: bool,
+}
+
+impl ConfigSettingState {
+    pub fn is_unsaved(&self) -> bool {
+        self.saved_value != self.current_value
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PluginEntry {
+    pub location: String,
+    pub cwd: Option<String>,
+    pub configuration: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginAliasEntry {
+    pub name: String,
+    pub plugin: PluginEntry,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVarEntry {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuItemEntry {
+    pub label: Option<String>,
+    pub actions: Vec<String>,
+    pub shortcut: Option<String>,
+}
+
+impl MenuItemEntry {
+    pub fn separator() -> Self {
+        MenuItemEntry::default()
+    }
+    pub fn is_separator(&self) -> bool {
+        self.label.is_none()
+    }
+    pub fn same_item(&self, other: &MenuItemEntry) -> bool {
+        self.label == other.label && self.actions == other.actions
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuSectionEntries {
+    pub section: String,
+    pub entries: Vec<MenuItemEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeSource {
+    #[default]
+    BuiltIn,
+    ConfigFile,
+    ThemeFolder,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeEntry {
+    pub name: String,
+    pub source: ThemeSource,
+    pub colours: Vec<String>,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigBlocks {
+    pub plugin_aliases: Vec<PluginAliasEntry>,
+    pub load_plugins: Vec<PluginEntry>,
+    pub env: Vec<EnvVarEntry>,
+    pub context_menu: Vec<MenuSectionEntries>,
+    pub themes: Vec<ThemeEntry>,
+}
+
+impl ConfigBlocks {
+    pub fn menu_section(&self, section: &str) -> Vec<MenuItemEntry> {
+        self.context_menu
+            .iter()
+            .find(|entries| entries.section == section)
+            .map(|entries| entries.entries.clone())
+            .unwrap_or_default()
+    }
+    pub fn theme(&self, name: &str) -> Option<&ThemeEntry> {
+        self.themes.iter().find(|theme| theme.name == name)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeybindingSource {
+    #[default]
+    Preset,
+    User,
+    Shared(String),
+    Layout,
+}
+
+impl KeybindingSource {
+    pub fn label(&self) -> String {
+        match self {
+            KeybindingSource::Preset => "preset".to_owned(),
+            KeybindingSource::User => "user file".to_owned(),
+            KeybindingSource::Shared(block) => format!("user file, {}", block),
+            KeybindingSource::Layout => "layout".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeybindingEntry {
+    pub mode: InputMode,
+    pub key: KeyWithModifier,
+    pub actions: Vec<String>,
+    pub source: KeybindingSource,
+    pub unbound: bool,
+    pub preset_actions: Option<Vec<String>>,
+    pub unsaved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MousebindingEntry {
+    pub mode: InputMode,
+    pub trigger: MouseTrigger,
+    pub actions: Vec<String>,
+    pub app_first: bool,
+    pub source: KeybindingSource,
+    pub unbound: bool,
+    pub preset_actions: Option<Vec<String>>,
+    pub unsaved: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSnapshot {
+    pub settings: Vec<ConfigSettingState>,
+    pub config_file_path: Option<String>,
+    pub backup_file_path: Option<String>,
+    pub pending_restart_settings: Vec<SettingKey>,
+    pub theme_names: Vec<String>,
+    pub plugin_aliases: Vec<String>,
+    pub load_plugins: Vec<String>,
+    pub env_vars: Vec<String>,
+    pub context_menu_items: Vec<String>,
+    pub blocks: ConfigBlocks,
+    pub saved_blocks: ConfigBlocks,
+    pub default_blocks: ConfigBlocks,
+    pub keybindings: Vec<KeybindingEntry>,
+    pub keybinds: KeybindsSelectionSnapshot,
+    pub mousebindings: Vec<MousebindingEntry>,
+    pub font_families: Vec<String>,
+}
+
+impl ConfigSnapshot {
+    pub fn setting(&self, key: SettingKey) -> Option<&ConfigSettingState> {
+        self.settings.iter().find(|setting| setting.key == key)
+    }
+    pub fn unsaved_count(&self) -> usize {
+        self.settings.iter().filter(|s| s.is_unsaved()).count()
+    }
 }
 
 // Response type for plugin API methods that open a pane in a new tab
@@ -4372,4 +5961,139 @@ fn a_floating_placement_carries_its_border_style_in_the_coordinates() {
         })
     );
     assert_eq!(placement.get_border_style(), coordinates.border_style);
+}
+
+#[cfg(test)]
+mod popup_placement_tests {
+    use super::*;
+
+    #[test]
+    fn corner_placements_parse_and_print_back() {
+        for (text, placement, corner) in [
+            (
+                "top-left",
+                PipePopupPlacement::TopLeft,
+                PopupCorner::TopLeft,
+            ),
+            (
+                "top-right",
+                PipePopupPlacement::TopRight,
+                PopupCorner::TopRight,
+            ),
+            (
+                "bottom-left",
+                PipePopupPlacement::BottomLeft,
+                PopupCorner::BottomLeft,
+            ),
+            (
+                "bottom-right",
+                PipePopupPlacement::BottomRight,
+                PopupCorner::BottomRight,
+            ),
+        ] {
+            assert_eq!(text.parse::<PipePopupPlacement>(), Ok(placement));
+            assert_eq!(placement.to_string(), text);
+            assert_eq!(placement.corner(), Some(corner));
+            assert_eq!(text.parse::<PopupCorner>(), Ok(corner));
+            assert_eq!(corner.to_string(), text);
+        }
+        assert_eq!(
+            "Top_Right".parse::<PipePopupPlacement>(),
+            Ok(PipePopupPlacement::TopRight)
+        );
+        assert_eq!(PipePopupPlacement::Pane.corner(), None);
+        assert!("middle".parse::<PipePopupPlacement>().is_err());
+        assert!("center".parse::<PopupCorner>().is_err());
+    }
+
+    #[test]
+    fn popup_options_default_to_a_focused_popup_without_a_corner() {
+        assert_eq!(
+            PopupOptions::default(),
+            PopupOptions {
+                focused: true,
+                corner: None,
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod extract_text_cluster_tests {
+    use super::*;
+
+    #[test]
+    fn column_extraction_keeps_combining_marks_with_their_base() {
+        let line = "ae\u{0301}b\u{1F468}\u{200D}\u{1F469}c";
+        assert_eq!(extract_text_by_columns(line, 1, 2), "e\u{0301}");
+        assert_eq!(
+            extract_text_from_column(line, 2),
+            "b\u{1F468}\u{200D}\u{1F469}c"
+        );
+        assert_eq!(extract_text_to_column(line, 2), "ae\u{0301}");
+        assert_eq!(extract_text_by_columns(line, 3, 5), "\u{1F468}\u{200D}");
+    }
+}
+
+#[cfg(test)]
+mod live_view_release_gesture_tests {
+    use super::*;
+
+    #[test]
+    fn a_key_written_twice_is_a_double_press_and_a_single_key_is_one_press() {
+        assert_eq!(
+            LiveViewReleaseGesture::parse("Esc Esc"),
+            Some(LiveViewReleaseGesture {
+                key: KeyWithModifier::new(BareKey::Esc),
+                double: true,
+            })
+        );
+        assert_eq!(
+            LiveViewReleaseGesture::parse("  Ctrl q   Ctrl q "),
+            Some(LiveViewReleaseGesture {
+                key: KeyWithModifier::new(BareKey::Char('q')).with_ctrl_modifier(),
+                double: true,
+            })
+        );
+        assert_eq!(
+            LiveViewReleaseGesture::parse("Ctrl Alt Home"),
+            Some(LiveViewReleaseGesture {
+                key: KeyWithModifier::new(BareKey::Home)
+                    .with_ctrl_modifier()
+                    .with_alt_modifier(),
+                double: false,
+            })
+        );
+        assert_eq!(
+            LiveViewReleaseGesture::parse("Esc"),
+            Some(LiveViewReleaseGesture {
+                key: KeyWithModifier::new(BareKey::Esc),
+                double: false,
+            })
+        );
+        assert_eq!(LiveViewReleaseGesture::parse(""), None);
+        assert_eq!(LiveViewReleaseGesture::parse("Esc Tab"), None);
+        assert_eq!(LiveViewReleaseGesture::parse("not a key"), None);
+        assert_eq!(
+            LiveViewReleaseGesture::parse(DEFAULT_LIVE_VIEW_RELEASE_KEY),
+            Some(LiveViewReleaseGesture {
+                key: KeyWithModifier::new(BareKey::F(9)),
+                double: false,
+            })
+        );
+    }
+
+    #[test]
+    fn the_gesture_is_shown_as_a_key_hint() {
+        assert_eq!(LiveViewReleaseGesture::display("Esc Esc"), "<ESC> twice");
+        assert_eq!(
+            LiveViewReleaseGesture::display(DEFAULT_LIVE_VIEW_RELEASE_KEY),
+            "<F9>"
+        );
+        assert_eq!(
+            LiveViewReleaseGesture::display("Ctrl Alt Home"),
+            "<Ctrl Alt HOME>"
+        );
+        assert_eq!(LiveViewReleaseGesture::display(" odd text "), "<odd text>");
+    }
 }
