@@ -265,6 +265,18 @@ pub fn call_update(
     keybinds: Option<&KeybindsVec>,
     context: EventContext,
 ) -> Result<RenderResponse> {
+    // Events tagged with a client the plugin was never told about (e.g. the
+    // short-lived client behind every `zellij pipe` CLI call) have no
+    // client_disconnected counterpart, so plugins that key state by client_id
+    // would grow their wasm memory by one entry per call until the limit.
+    if let (Some(client_id), Some(shared)) = (
+        context.client_id,
+        running_plugin.store.data().shared.as_ref(),
+    ) {
+        if !shared.clients.contains(&client_id) {
+            return Ok(RenderResponse::Nothing);
+        }
+    }
     let protobuf_context: ProtobufEventContext = context.into();
     let protobuf_event: ProtobufEvent = event_to_protobuf_with_keybinds(event.clone(), keybinds)
         .map_err(|e| anyhow!("Failed to convert to protobuf: {:?}", e))?;
