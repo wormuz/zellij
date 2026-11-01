@@ -46,6 +46,7 @@ keybinds {
         bind "f" { ToggleFocusFullscreen; SwitchToMode "Locked"; }
         bind "Shift f" { ToggleFocusNoUiFullscreen; SwitchToMode "Locked"; }
         bind "z" { TogglePaneFrames; SwitchToMode "Locked"; }
+        bind "Shift z" { ToggleBars; SwitchToMode "Locked"; }
         bind "w" { ToggleFloatingPanes; SwitchToMode "Locked"; }
         bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "Locked"; }
         bind "c" { SwitchToMode "RenamePane"; PaneNameInput 0;}
@@ -255,6 +256,7 @@ mousebinds {
         bind "Triple Left" on="content" { Select; }
         bind "Double Left" on="frame" { ToggleFullscreen; }
         bind "{primary} Left" on="frame" { ResizePane; }
+        bind "{primary} Left" on="content" { DrawFloatingPane; }
         bind "{secondary} Left" { GroupToggle; }
         bind "{secondary} Right" { Ungroup; }
         bind "{secondary} Middle" { Ignore; }

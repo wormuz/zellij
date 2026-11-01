@@ -23,8 +23,9 @@ pub const MIN_PANE_WIDTH: usize = 6;
 pub const MIN_TEXT_WIDTH: usize = 12;
 pub const TAB_SWITCH_HINT: &str = "<TAB> switch";
 pub const EMPTY_INBOX_TEXT: &str = "Nothing in the inbox";
-pub const LIST_MIN_COLS: usize = 28;
-pub const LIST_MAX_COLS: usize = 48;
+pub const LIST_MIN_COLS: usize = 20;
+pub const LIST_MAX_COLS: usize = 32;
+pub const LIST_SHARE: usize = 5;
 pub const LIVE_VIEW_MIN_COLS: usize = 30;
 pub const LIVE_VIEW_MIN_ROWS: usize = 8;
 pub const LIVE_VIEW_GAP: usize = 2;
@@ -148,6 +149,7 @@ pub struct LiveLayout {
     pub box_height: usize,
     pub status_y: usize,
     pub help_y: usize,
+    pub framed: bool,
 }
 
 impl LiveLayout {
@@ -155,36 +157,31 @@ impl LiveLayout {
         cols.saturating_sub(3).max(10)
     }
 
-    pub fn compute(
-        x: usize,
-        y: usize,
-        cols: usize,
-        rows: usize,
-        help_height: usize,
-    ) -> Option<LiveLayout> {
+    pub fn compute(x: usize, y: usize, cols: usize, rows: usize) -> Option<LiveLayout> {
         let list_x = x + 2;
-        let available = cols.saturating_sub(3);
-        let list_width = (available * 3 / 10).clamp(LIST_MIN_COLS, LIST_MAX_COLS);
+        let list_width = (cols / LIST_SHARE).clamp(LIST_MIN_COLS, LIST_MAX_COLS);
         let box_x = list_x + list_width + LIVE_VIEW_GAP;
-        let box_width = (x + cols).saturating_sub(box_x + 1);
-        let top = y + 1;
-        let help_y = (y + rows).saturating_sub(help_height);
-        let status_y = help_y.checked_sub(1)?;
-        let box_height = status_y.checked_sub(top)?;
-        if box_width < LIVE_VIEW_MIN_COLS + 2 || box_height < LIVE_VIEW_MIN_ROWS + 2 {
+        let box_width = (x + cols).checked_sub(box_x)?;
+        let box_height = rows.checked_sub(1)?;
+        if box_width < LIVE_VIEW_MIN_COLS || box_height < LIVE_VIEW_MIN_ROWS {
             return None;
         }
         Some(LiveLayout {
             list_x,
             list_width,
-            top,
-            list_rows: box_height - 2,
+            top: y,
+            list_rows: box_height.saturating_sub(1),
             box_x,
             box_width,
             box_height,
-            status_y,
-            help_y,
+            status_y: y + box_height,
+            help_y: y + box_height,
+            framed: false,
         })
+    }
+
+    pub fn separator_x(&self) -> usize {
+        self.box_x.saturating_sub(1)
     }
 
     pub fn around_box(x: usize, y: usize, width: usize, height: usize) -> Option<LiveLayout> {
@@ -202,10 +199,14 @@ impl LiveLayout {
             box_height,
             status_y: y + box_height,
             help_y: y + height,
+            framed: true,
         })
     }
 
     pub fn view_rect(&self) -> (usize, usize, usize, usize) {
+        if !self.framed {
+            return (self.box_x, self.top, self.box_width, self.box_height);
+        }
         (
             self.box_x + 1,
             self.top + 1,
@@ -328,6 +329,7 @@ pub struct Inbox {
     pub card_targets: Vec<(usize, Range<usize>, CardTarget)>,
     pub browser_targets: Vec<(usize, Range<usize>, BrowserTarget)>,
     pub card_hovered: Option<CardTarget>,
+    pub hovered: Option<ItemKey>,
     pub away_since_ms: Option<u64>,
     pub list_scroll: usize,
     pub selected_range: Range<usize>,
@@ -337,11 +339,15 @@ pub struct Inbox {
     pub select_newest_on_arrival: bool,
     pub live: Option<LiveViewStatus>,
     pub resize_allowed: Option<bool>,
+    pub own_resize_allowed: bool,
+    pub current_session: Option<String>,
     pub live_layout: Option<LiveLayout>,
     pub live_view_drawn: bool,
+    tabs_row: Option<(usize, usize, usize)>,
     pub live_mode: bool,
     pub live_view_sent: Option<LiveView>,
     pub capture_target: Option<ItemKey>,
+    capture_tab: Option<BrowserTab>,
     pub capture_position: Option<usize>,
     pub capture_labels: Option<(String, String)>,
     pub live_notice: Option<String>,
@@ -349,6 +355,7 @@ pub struct Inbox {
     pub sessions_target: Option<SessionsLiveTarget>,
     pub listed: Vec<GlobalAttentionItem>,
     pub held: Vec<ItemKey>,
+    viewed: Vec<ItemKey>,
     dropped: Vec<DroppedItem>,
     shown_items: Vec<GlobalAttentionItem>,
 }
@@ -377,21 +384,6 @@ impl DroppedItem {
 
 fn always_listed(item: &GlobalAttentionItem) -> bool {
     item.is_counted() || item.item.attention.watched
-}
-
-fn holdable(item: &GlobalAttentionItem) -> bool {
-    !item.is_muted()
-        && matches!(
-            item.item.attention.effective_status(),
-            AttentionStatus::Done | AttentionStatus::Failed
-        )
-}
-
-fn holds(known: &GlobalAttentionItem, server: Option<&GlobalAttentionItem>) -> bool {
-    holdable(known)
-        && server
-            .map(|item| !item.is_muted() && item.item.attention.status.is_idle())
-            .unwrap_or(true)
 }
 
 fn ends_the_pane(state: MirrorState) -> bool {
@@ -460,6 +452,9 @@ pub fn away_text(away_ms: u64) -> String {
 }
 
 pub fn style_status(text: Text, status: AttentionStatus, range: Range<usize>) -> Text {
+    if let Some(rgb) = crate::badge_colors::of(status) {
+        return text.rgb_color_range(rgb, range);
+    }
     match status {
         AttentionStatus::NeedsYou => text.color_range(0, range),
         AttentionStatus::Failed => text.error_color_range(range),
@@ -670,7 +665,7 @@ impl Inbox {
         self.global = Some(global);
         self.refresh_listed();
         let capturing = self.is_capturing();
-        if self.select_newest_on_arrival && self.counted_count() > 0 && !capturing {
+        if self.select_newest_on_arrival && self.has_rows() && !capturing {
             self.select_newest_on_arrival = false;
             self.tab = BrowserTab::Inbox;
             self.tab_chosen = true;
@@ -689,7 +684,7 @@ impl Inbox {
             }
         }
         if !self.tab_chosen {
-            self.tab = if self.counted_count() == 0 {
+            self.tab = if !self.has_rows() {
                 BrowserTab::Sessions
             } else {
                 BrowserTab::Inbox
@@ -735,6 +730,32 @@ impl Inbox {
         self.held.contains(key)
     }
 
+    fn holds(&self, known: &GlobalAttentionItem, server: Option<&GlobalAttentionItem>) -> bool {
+        !known.is_muted()
+            && !matches!(
+                known.item.attention.effective_status(),
+                AttentionStatus::Idle | AttentionStatus::Working
+            )
+            && self.viewed.contains(&ItemKey::of(known))
+            && server
+                .map(|item| !item.is_muted() && item.item.attention.status.is_idle())
+                .unwrap_or(true)
+    }
+
+    fn note_viewed(&mut self) {
+        let Some(key) = self.live_view_target() else {
+            return;
+        };
+        if self.is_dropped(&key) || self.viewed.contains(&key) {
+            return;
+        }
+        self.viewed.push(key);
+    }
+
+    pub fn has_rows(&self) -> bool {
+        self.counted_count() > 0 || !self.held.is_empty()
+    }
+
     fn server_item(&self, key: &ItemKey) -> Option<&GlobalAttentionItem> {
         self.server_items()
             .iter()
@@ -764,7 +785,7 @@ impl Inbox {
             .filter(|known| self.session_runs(&known.session))
             .filter_map(|known| {
                 let server = self.server_item(&ItemKey::of(&known));
-                if holds(&known, server) {
+                if self.holds(&known, server) {
                     let mut kept = known;
                     kept.item.attention.watched = server
                         .map(|item| item.item.attention.watched)
@@ -784,7 +805,7 @@ impl Inbox {
             let key = ItemKey::of(item);
             let known = self.listed.iter().find(|known| ItemKey::of(known) == key);
             match known {
-                Some(known) if holds(known, Some(item)) => {
+                Some(known) if self.holds(known, Some(item)) => {
                     items.push(known.clone());
                     held.push(key);
                 },
@@ -793,7 +814,7 @@ impl Inbox {
         }
         for known in &self.listed {
             let key = ItemKey::of(known);
-            if self.server_item(&key).is_none() && holds(known, None) {
+            if self.server_item(&key).is_none() && self.holds(known, None) {
                 items.push(known.clone());
                 held.push(key);
             }
@@ -839,6 +860,7 @@ impl Inbox {
 
     pub fn forget_listed(&mut self) -> bool {
         self.dropped.clear();
+        self.viewed.clear();
         if self.listed.is_empty() {
             return false;
         }
@@ -888,6 +910,7 @@ impl Inbox {
         };
         self.mark_selected_seen();
         self.drop_key(&key);
+        self.viewed.retain(|viewed| *viewed != key);
         self.forget_listed_where(|known| ItemKey::of(known) == key);
     }
 
@@ -898,6 +921,7 @@ impl Inbox {
         for key in keys {
             self.drop_key(&key);
         }
+        self.viewed.clear();
         self.listed.clear();
         self.rebuild_items();
         self.keep_selection_at(previous_position);
@@ -959,7 +983,10 @@ impl Inbox {
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                self.matches_filter(item) && (self.show_quiet || self.always_listed(item))
+                self.matches_filter(item)
+                    && (self.show_quiet
+                        || self.always_listed(item)
+                        || self.is_held(&ItemKey::of(item)))
             })
             .map(|(index, _)| index)
             .collect();
@@ -1049,7 +1076,7 @@ impl Inbox {
             order
                 .iter()
                 .map(|index| &self.items()[*index])
-                .filter(|item| item.is_counted())
+                .filter(|item| item.is_counted() && !self.is_held(&ItemKey::of(item)))
         };
         let newest = counted()
             .find(|item| !item.item.attention.watched)
@@ -1284,6 +1311,7 @@ impl Inbox {
             text = text.color_range(3, hint_start..hint_start + "<TAB>".chars().count());
         }
         print_text_with_coordinates(text, x, y, Some(cols.max(1)), None);
+        self.tabs_row = Some((y, x + line.width(), x + cols));
         self.browser_targets
             .retain(|(_, _, t)| !matches!(t, BrowserTarget::Tab(_)));
         let inbox_width = inbox.width();
@@ -1312,18 +1340,48 @@ impl Inbox {
     }
 
     pub fn current_resize_allowed(&self) -> bool {
+        if self.views_own_session() {
+            return self.own_resize_allowed;
+        }
         self.resize_allowed
             .or_else(|| {
                 self.live
                     .as_ref()
-                    .filter(|live| live.target.is_some())
+                    .filter(|live| {
+                        live.target
+                            .as_ref()
+                            .map(|target| !self.is_own_session(&target.session))
+                            .unwrap_or(false)
+                    })
                     .map(|live| live.resize_allowed)
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     pub fn toggle_resize(&mut self) {
+        if self.views_own_session() {
+            self.own_resize_allowed = !self.own_resize_allowed;
+            return;
+        }
         self.resize_allowed = Some(!self.current_resize_allowed());
+    }
+
+    pub fn is_own_session(&self, session: &str) -> bool {
+        self.current_session.as_deref() == Some(session)
+    }
+
+    fn views_own_session(&self) -> bool {
+        self.live_view_target()
+            .map(|key| self.is_own_session(&key.session))
+            .unwrap_or(false)
+    }
+
+    fn requested_resize_allowed(&self) -> Option<bool> {
+        if self.views_own_session() {
+            Some(self.own_resize_allowed)
+        } else {
+            Some(self.resize_allowed.unwrap_or(false))
+        }
     }
 
     pub fn release_key_text(&self) -> String {
@@ -1337,7 +1395,7 @@ impl Inbox {
     }
 
     pub fn live_view_target(&self) -> Option<ItemKey> {
-        if self.is_capturing() {
+        if self.is_capturing() && self.capture_tab == Some(self.tab) {
             if let Some(key) = self.capture_target.as_ref() {
                 return Some(key.clone());
             }
@@ -1345,7 +1403,18 @@ impl Inbox {
         if let Some(target) = self.sessions_target.as_ref() {
             return Some(target.key.clone());
         }
+        if self.tab != BrowserTab::Inbox {
+            return None;
+        }
         self.selected_target().map(ItemKey::of)
+    }
+
+    pub fn leave_tab(&mut self) {
+        if self.is_capturing() || self.capture_target.is_some() {
+            set_live_view_input(false);
+        }
+        self.capture_target = None;
+        self.capture_tab = None;
     }
 
     pub fn live_view_request(&self, layout: &LiveLayout) -> LiveView {
@@ -1360,7 +1429,7 @@ impl Inbox {
             y,
             cols,
             rows,
-            resize_allowed: self.resize_allowed,
+            resize_allowed: self.requested_resize_allowed(),
             view_only: false,
         }
     }
@@ -1389,13 +1458,15 @@ impl Inbox {
         cols: usize,
         rows: usize,
     ) -> Option<LiveLayout> {
-        let help = self.help_block(LiveLayout::help_width(cols), true);
-        LiveLayout::compute(x, y, cols, rows, help.len())
+        LiveLayout::compute(x, y, cols, rows)
     }
 
     pub fn prepare_live_view(&mut self, x: usize, y: usize, cols: usize, rows: usize) {
         match self.plan_live_layout(x, y, cols, rows) {
-            Some(layout) => self.show_live_view(&layout),
+            Some(layout) => {
+                self.note_viewed();
+                self.show_live_view(&layout);
+            },
             None => self.clear_live_view(),
         }
     }
@@ -1436,29 +1507,42 @@ impl Inbox {
         };
         self.live_notice = None;
         self.capture_target = Some(key);
+        self.capture_tab = Some(self.tab);
         self.capture_position = self.selected_position(&self.ordered());
         set_live_view_input(true);
         true
     }
 
     fn adopt_resize_allowed(&mut self, status: &LiveViewStatus) {
-        if status.target.is_none() {
+        let Some(target) = status.target.as_ref() else {
             self.resize_requests_in_flight.clear();
             return;
-        }
+        };
         if let Some(requested) = self.resize_requests_in_flight.front() {
             if *requested == status.resize_allowed {
                 self.resize_requests_in_flight.pop_front();
             }
             return;
         }
+        let own = self.is_own_session(&target.session);
         let reported = Some(status.resize_allowed);
         let previous = self
             .live
             .as_ref()
-            .filter(|live| live.target.is_some())
+            .filter(|live| {
+                live.target
+                    .as_ref()
+                    .map(|previous| self.is_own_session(&previous.session) == own)
+                    .unwrap_or(false)
+            })
             .map(|live| live.resize_allowed);
         let changed_elsewhere = previous.is_some() && previous != reported;
+        if own {
+            if changed_elsewhere {
+                self.own_resize_allowed = status.resize_allowed;
+            }
+            return;
+        }
         if self.resize_allowed.is_none() || changed_elsewhere {
             self.resize_allowed = reported;
         }
@@ -1487,11 +1571,16 @@ impl Inbox {
         if status.input_captured {
             self.live_notice = None;
             if self.capture_target.is_none() {
+                let inbox_item = match self.tab {
+                    BrowserTab::Inbox => self.selected_item().map(ItemKey::of),
+                    BrowserTab::Sessions => None,
+                };
                 self.capture_target = self
                     .sessions_target
                     .as_ref()
                     .map(|target| target.key.clone())
-                    .or_else(|| self.selected_item().map(ItemKey::of));
+                    .or(inbox_item);
+                self.capture_tab = Some(self.tab);
                 self.capture_position = self.selected_position(&self.ordered());
             }
             self.live = Some(status);
@@ -1503,6 +1592,7 @@ impl Inbox {
         self.live = Some(status);
         if was_captured || self.capture_target.is_some() {
             self.capture_target = None;
+            self.capture_tab = None;
             self.settle_selection_after_capture();
         }
         true
@@ -1546,10 +1636,10 @@ impl Inbox {
             return String::new();
         };
         let mut parts = vec![];
-        if !live.resize_allowed {
+        if !live.resize_allowed && !live.pinned {
             parts.push("resize off".to_owned());
         }
-        if live.resize_allowed || live.state != MirrorState::Live {
+        if live.resize_allowed || live.pinned || live.state != MirrorState::Live {
             return parts.join(" · ");
         }
         let view_size = self
@@ -1571,9 +1661,10 @@ impl Inbox {
                 .clone()
                 .unwrap_or_else(|| ("?".to_owned(), "?".to_owned()));
             return format!(
-                "typing into {} › {} · {} or click outside to return",
+                "typing into {} › {} · {}, {} or click outside to return",
                 session,
                 pane,
+                TYPE_KEY,
                 self.release_key_text()
             );
         }
@@ -1654,24 +1745,18 @@ impl Inbox {
         self.browser_targets
             .retain(|(_, _, t)| matches!(t, BrowserTarget::Tab(_)));
         self.live_layout = None;
-        let help_width = LiveLayout::help_width(cols);
-        let live_help = self.help_block(help_width, true);
-        if let Some(layout) = LiveLayout::compute(x, y, cols, rows, live_help.len()) {
+        if let Some(layout) = LiveLayout::compute(x, y, cols, rows) {
             self.live_layout = Some(layout);
-            self.render_live_browser(&layout, &live_help, help_width, simplified_ui);
+            self.render_live_browser(&layout, cols, simplified_ui);
             return;
         }
         self.render_list_browser(x, y, cols, rows, simplified_ui);
     }
 
-    fn render_live_browser(
-        &mut self,
-        layout: &LiveLayout,
-        help: &[crate::help::BlockLine],
-        help_width: usize,
-        simplified_ui: bool,
-    ) {
+    fn render_live_browser(&mut self, layout: &LiveLayout, cols: usize, simplified_ui: bool) {
         let now = now_ms();
+        let capturing = self.is_capturing();
+        self.view_labels();
         let lines = self.block_lines(layout.list_width, now, simplified_ui);
         self.render_list(
             lines,
@@ -1680,8 +1765,109 @@ impl Inbox {
             layout.list_width,
             layout.list_rows,
         );
-        self.render_live_view_box(layout);
-        self.render_help_block(help, layout.list_x, layout.help_y, help_width, true);
+        let separator = if capturing { "┃" } else { "│" };
+        let separator_x = layout.separator_x();
+        for row in layout.top..layout.top + layout.box_height {
+            print_text_with_coordinates(
+                view_border(separator, capturing),
+                separator_x,
+                row,
+                Some(1),
+                None,
+            );
+            self.browser_targets.push((
+                row,
+                layout.box_x..layout.box_x + layout.box_width,
+                BrowserTarget::LiveView,
+            ));
+        }
+        self.render_bottom_line(layout, cols, capturing);
+    }
+
+    fn render_bottom_line(&mut self, layout: &LiveLayout, cols: usize, capturing: bool) {
+        let x = layout.list_x;
+        let y = layout.help_y;
+        let width = LiveLayout::help_width(cols);
+        let details = self.live_view_details_text();
+        let browsing = !capturing && self.live_notice.is_none();
+        let crowded = if !browsing {
+            self.live_view_hint_text().width() + details.width() + 2 > width
+        } else {
+            let detail_need = self
+                .selected_detail(width)
+                .map(|detail| detail.content().width())
+                .unwrap_or(0);
+            let help_need = self
+                .help_block(width, true)
+                .last()
+                .map(|line| line.text.width())
+                .unwrap_or(0);
+            detail_need > 0 && help_need + detail_need + details.width() + 4 > width
+        };
+        let tabs_row = self.tabs_row.take();
+        if crowded && !details.is_empty() {
+            if let Some((tabs_y, tabs_end, tabs_right)) = tabs_row {
+                let right = tabs_right.saturating_sub(2);
+                if tabs_end + 2 + details.width() <= right {
+                    print_text_with_coordinates(
+                        Text::from(details.as_str()).dim_all(),
+                        right - details.width(),
+                        tabs_y,
+                        Some(details.width()),
+                        None,
+                    );
+                }
+            }
+        }
+        let reserved = if details.is_empty() || details.width() + 2 > width / 2 || crowded {
+            0
+        } else {
+            details.width() + 2
+        };
+        let left_width = width - reserved;
+        let used = if capturing || self.live_notice.is_some() {
+            let hint = truncate_plain(&self.live_view_hint_text(), left_width);
+            let used = hint.width();
+            let text = self.view_hint(&hint, capturing);
+            print_text_with_coordinates(text, x, y, Some(used.max(1)), None);
+            used
+        } else {
+            let help = self.help_block(left_width, true);
+            let Some(line) = help.last().cloned() else {
+                return;
+            };
+            let used = line.text.width();
+            self.render_help_block(&[line], x, y, left_width, true);
+            used
+        };
+        let mut right = x + width;
+        if reserved > 0 {
+            right -= details.width();
+            print_text_with_coordinates(
+                Text::from(details.as_str()).dim_all(),
+                right,
+                y,
+                Some(details.width()),
+                None,
+            );
+            right -= 2;
+        }
+        if !capturing && self.live_notice.is_none() {
+            let room = right.saturating_sub(x + used + 2);
+            if let Some(detail) = self
+                .selected_detail(room)
+                .filter(|_| room >= MIN_TEXT_WIDTH)
+            {
+                let detail_width = detail.content().width();
+                print_text_with_coordinates(
+                    detail,
+                    right - detail_width,
+                    y,
+                    Some(detail_width),
+                    None,
+                );
+            }
+        }
     }
 
     fn render_list_browser(
@@ -2082,11 +2268,16 @@ impl Inbox {
         self.selected_range = 0..0;
         self.item_ranges.clear();
         if self.only_here {
-            lines.push(BlockLine::Text {
-                text: key_hint_text("Only this session · <f> show all sessions").dim_all(),
-                gutter: None,
-                target: None,
-            });
+            for text in key_hint_text("Only this session · <f> show all sessions")
+                .dim_all()
+                .wrap(width)
+            {
+                lines.push(BlockLine::Text {
+                    text,
+                    gutter: None,
+                    target: None,
+                });
+            }
             lines.push(BlockLine::Blank);
         }
         let order = self.ordered();
@@ -2139,6 +2330,16 @@ impl Inbox {
                 if is_selected {
                     text = text.selected();
                 }
+                if self.hovered.as_ref() == Some(&ItemKey::of(&item)) {
+                    text = text.italic_range(hover_range(
+                        &item,
+                        session_width,
+                        width,
+                        now,
+                        show_age,
+                        simplified_ui,
+                    ));
+                }
                 lines.push(BlockLine::Item {
                     text,
                     target: Some(BrowserTarget::Item(ItemKey::of(&item))),
@@ -2173,11 +2374,13 @@ impl Inbox {
                     quiet
                 )
             };
-            lines.push(BlockLine::Text {
-                text: key_hint_text(&truncate_plain(&line, width)).dim_all(),
-                gutter: None,
-                target: Some(BrowserTarget::ShowQuiet),
-            });
+            for text in key_hint_text(&line).dim_all().wrap(width) {
+                lines.push(BlockLine::Text {
+                    text,
+                    gutter: None,
+                    target: Some(BrowserTarget::ShowQuiet),
+                });
+            }
         }
         while matches!(lines.last(), Some(BlockLine::Blank)) {
             lines.pop();
@@ -2529,15 +2732,21 @@ fn section_heading(section: Section, count: usize, width: usize) -> Text {
         .dim_range(title_end..total)
 }
 
-fn pane_row(
+struct PaneRowParts {
+    session: String,
+    head: String,
+    pane: String,
+    tail: String,
+}
+
+fn pane_row_parts(
     item: &GlobalAttentionItem,
     session_width: usize,
     width: usize,
     now: u64,
     show_age: bool,
     simplified_ui: bool,
-    held: bool,
-) -> Text {
+) -> PaneRowParts {
     let symbol = item_symbol(item, simplified_ui);
     let session = truncate_plain(&session_name(item), session_width);
     let session_cell = format!(
@@ -2550,7 +2759,6 @@ fn pane_row(
     } else {
         format!("{} {}  ", symbol, session_cell)
     };
-    let head_len = head.chars().count();
     let mut tail = String::new();
     if show_age {
         let detail = row_text(item);
@@ -2572,6 +2780,46 @@ fn pane_row(
         room.min(pane.width().max(room / 2))
     };
     let pane = truncate_middle(&pane, pane_room);
+    PaneRowParts {
+        session,
+        head,
+        pane,
+        tail,
+    }
+}
+
+fn hover_range(
+    item: &GlobalAttentionItem,
+    session_width: usize,
+    width: usize,
+    now: u64,
+    show_age: bool,
+    simplified_ui: bool,
+) -> std::ops::Range<usize> {
+    let parts = pane_row_parts(item, session_width, width, now, show_age, simplified_ui);
+    if session_width > 0 {
+        return 2..2 + parts.session.chars().count();
+    }
+    let start = parts.head.chars().count();
+    start..start + parts.pane.chars().count()
+}
+
+fn pane_row(
+    item: &GlobalAttentionItem,
+    session_width: usize,
+    width: usize,
+    now: u64,
+    show_age: bool,
+    simplified_ui: bool,
+    held: bool,
+) -> Text {
+    let PaneRowParts {
+        session,
+        head,
+        pane,
+        tail,
+    } = pane_row_parts(item, session_width, width, now, show_age, simplified_ui);
+    let head_len = head.chars().count();
     let pane_len = pane.chars().count();
     let line = truncate_plain(&format!("{}{}{}", head, pane, tail), width);
     let padded = format!("{}{}", line, " ".repeat(width.saturating_sub(line.width())));
@@ -3149,7 +3397,7 @@ mod tests {
         inbox.help_hints = browser_hints();
         let help = inbox.help_block(56, false);
         assert!(help[0].text.starts_with("<ENTER> go there  <c> dismiss"));
-        render(&mut inbox, 60, 15, false);
+        render(&mut inbox, 50, 15, false);
         assert_eq!(inbox.live_layout, None);
         assert_eq!(inbox.browser_target_at(5, 8), None);
         assert_eq!(
@@ -3161,24 +3409,29 @@ mod tests {
             inbox.browser_target_at(8, 8),
             Some(BrowserTarget::ShowQuiet)
         );
-        assert_eq!(inbox.browser_target_at(9, 8), None);
         assert_eq!(
-            inbox.browser_target_at(11, 2),
+            inbox.browser_target_at(9, 8),
+            Some(BrowserTarget::ShowQuiet),
+            "the hidden items line wraps instead of being cut"
+        );
+        assert_eq!(inbox.browser_target_at(10, 8), None);
+        assert_eq!(
+            inbox.browser_target_at(12, 2),
             Some(BrowserTarget::Action(ItemAction::Go))
         );
         assert_eq!(
-            inbox.browser_target_at(11, 17),
+            inbox.browser_target_at(12, 17),
             Some(BrowserTarget::Action(ItemAction::Go))
         );
-        assert_eq!(inbox.browser_target_at(11, 18), None);
+        assert_eq!(inbox.browser_target_at(12, 18), None);
         assert_eq!(
-            inbox.browser_target_at(11, 22),
+            inbox.browser_target_at(12, 22),
             Some(BrowserTarget::Action(ItemAction::Dismiss))
         );
-        assert_eq!(inbox.browser_target_at(12, 8), None);
-        render(&mut inbox, 60, 15, false);
+        assert_eq!(inbox.browser_target_at(13, 8), None);
+        render(&mut inbox, 50, 15, false);
         assert_eq!(
-            inbox.browser_target_at(11, 22),
+            inbox.browser_target_at(12, 22),
             Some(BrowserTarget::Action(ItemAction::Dismiss))
         );
         assert_eq!(
@@ -3216,17 +3469,16 @@ mod tests {
             .clone();
         assert_eq!(columns, layout.box_x..layout.box_x + layout.box_width);
         let sent = inbox.live_view_sent.clone().expect("the view was set");
-        assert_eq!(sent.x, layout.box_x + 1);
-        assert_eq!(sent.y, layout.top + 1);
-        assert_eq!(sent.cols, layout.box_width - 2);
-        assert_eq!(sent.rows, layout.box_height - 2);
-        assert_eq!(sent.x + sent.cols + 1, columns.end);
-        assert_eq!(sent.y + sent.rows + 1, layout.top + layout.box_height);
+        assert_eq!(sent.x, layout.box_x);
+        assert_eq!(sent.y, layout.top);
+        assert_eq!(sent.cols, layout.box_width);
+        assert_eq!(sent.rows, layout.box_height);
+        assert_eq!(sent.x + sent.cols, columns.end);
         assert_eq!(sent.target, PaneAddress::local("api", PaneId::Terminal(1)));
         assert!(!sent.view_only);
-        assert!(layout.list_x + layout.list_width < layout.box_x);
-        assert!(layout.status_y < layout.help_y);
-        assert_eq!(layout.status_y, layout.top + layout.box_height);
+        assert!(layout.list_x + layout.list_width < layout.separator_x());
+        assert_eq!(layout.separator_x() + 1, layout.box_x);
+        assert_eq!(layout.help_y, layout.top + layout.box_height);
         assert_eq!(
             inbox.browser_target_at((layout.top + 3) as isize, layout.box_x + 5),
             Some(BrowserTarget::LiveView)
@@ -3234,32 +3486,65 @@ mod tests {
     }
 
     #[test]
-    fn the_list_takes_three_tenths_and_the_view_needs_thirty_columns_and_eight_rows() {
-        let layout = LiveLayout::compute(0, 1, 120, 15, 2).unwrap();
+    fn the_list_takes_a_fifth_and_the_view_gets_the_rest_beside_a_separator() {
+        let layout = LiveLayout::compute(0, 1, 120, 29).unwrap();
         assert_eq!(layout.list_x, 2);
-        assert_eq!(layout.list_width, 35);
-        assert_eq!(layout.box_x, 39);
-        assert_eq!(layout.box_width, 80);
-        assert_eq!(layout.view_rect(), (40, 3, 78, 9));
-        let wide = LiveLayout::compute(0, 1, 300, 30, 2).unwrap();
+        assert_eq!(layout.list_width, 24);
+        assert_eq!(layout.separator_x(), 27);
+        assert_eq!(layout.view_rect(), (28, 1, 92, 28));
+        assert_eq!(layout.list_rows, 27);
+        assert_eq!(layout.help_y, 29);
+        let wide = LiveLayout::compute(0, 1, 300, 30).unwrap();
         assert_eq!(wide.list_width, LIST_MAX_COLS);
-        let narrowest = LiveLayout::compute(0, 1, 65, 15, 2).unwrap();
+        let narrowest = LiveLayout::compute(0, 1, 54, 15).unwrap();
         assert_eq!(narrowest.list_width, LIST_MIN_COLS);
         assert_eq!(narrowest.view_rect().2, LIVE_VIEW_MIN_COLS);
-        assert_eq!(LiveLayout::compute(0, 1, 64, 15, 2), None);
-        assert_eq!(LiveLayout::compute(0, 1, 60, 30, 2), None);
-        let shortest = LiveLayout::compute(0, 1, 88, 14, 2).unwrap();
+        assert_eq!(LiveLayout::compute(0, 1, 53, 15), None);
+        let shortest = LiveLayout::compute(0, 1, 88, 9).unwrap();
         assert_eq!(shortest.view_rect().3, LIVE_VIEW_MIN_ROWS);
-        assert_eq!(LiveLayout::compute(0, 1, 88, 13, 2), None);
-        assert_eq!(LiveLayout::compute(0, 1, 88, 15, 4), None);
+        assert_eq!(LiveLayout::compute(0, 1, 88, 8), None);
         let mut inbox = sample();
-        render(&mut inbox, 64, 15, false);
+        render(&mut inbox, 53, 15, false);
         assert_eq!(inbox.live_layout, None);
         assert_eq!(inbox.live_view_sent, None);
         assert!(!inbox.live_view_drawn);
-        render(&mut inbox, 65, 15, false);
+        render(&mut inbox, 54, 15, false);
         assert!(inbox.live_layout.is_some());
         assert!(inbox.live_view_drawn);
+    }
+
+    #[test]
+    fn the_list_sits_a_line_below_the_tabs_with_a_line_between_sections() {
+        let mut inbox = sample();
+        render(&mut inbox, 120, 29, false);
+        assert_eq!(
+            inbox.browser_target_at(1, 4),
+            None,
+            "padding under the tabs"
+        );
+        assert_eq!(inbox.browser_target_at(2, 4), None, "a section title");
+        assert_eq!(
+            inbox.browser_target_at(3, 4),
+            Some(BrowserTarget::Item(key("api", 1)))
+        );
+        assert_eq!(
+            inbox.browser_target_at(4, 4),
+            None,
+            "padding between sections"
+        );
+        assert_eq!(
+            inbox.browser_target_at(6, 4),
+            Some(BrowserTarget::Item(key("here", 2)))
+        );
+        assert_eq!(inbox.browser_target_at(5, 27), None, "the separator");
+        assert_eq!(
+            inbox.browser_target_at(5, 40),
+            Some(BrowserTarget::LiveView)
+        );
+        assert_eq!(
+            inbox.browser_target_at(29, 3),
+            Some(BrowserTarget::Action(ItemAction::Go))
+        );
     }
 
     fn live_status(target: Option<ItemKey>, captured: bool) -> LiveViewStatus {
@@ -3311,7 +3596,7 @@ mod tests {
         );
         assert_eq!(
             inbox.live_view_hint_text(),
-            "typing into here › pane2 · <F9> or click outside to return"
+            "typing into here › pane2 · <Alt ENTER>, <F9> or click outside to return"
         );
         let mut released = live_status(Some(key("here", 2)), false);
         released.input_released_by = Some(LiveViewRelease::Key);
@@ -3354,7 +3639,7 @@ mod tests {
                 .live_view_sent
                 .as_ref()
                 .map(|view| view.resize_allowed),
-            Some(None)
+            Some(Some(false))
         );
         let mut reported = live_status(inbox.live_view_target(), false);
         reported.resize_allowed = false;
@@ -3395,8 +3680,16 @@ mod tests {
             cols: view_cols,
             rows: view_rows,
         });
-        inbox.apply_live_view_status(reported);
+        inbox.apply_live_view_status(reported.clone());
         assert_eq!(inbox.live_view_details_text(), "resize off");
+        reported.pinned = true;
+        reported.source_size = Some(Size { cols: 80, rows: 24 });
+        inbox.apply_live_view_status(reported);
+        assert_eq!(
+            inbox.live_view_details_text(),
+            "",
+            "a pane resized by typing into it is neither off nor cropped"
+        );
         let mut resizing = live_status(inbox.live_view_target(), true);
         resizing.source_size = Some(Size { cols: 80, rows: 24 });
         inbox.toggle_resize();
@@ -3620,7 +3913,7 @@ mod tests {
                 ("work", 8),
             ])
         );
-        inbox.live_layout = LiveLayout::compute(0, 1, 120, 30, 1);
+        inbox.live_layout = LiveLayout::compute(0, 1, 120, 30);
         let lines = inbox.block_lines(40, 200, false);
         assert_eq!(
             contents(&lines)[..7].to_vec(),
@@ -3677,6 +3970,11 @@ mod tests {
         );
         assert_eq!(level(&row, 0), vec![0]);
         assert!(level(&row, 4).is_empty());
+        assert_eq!(
+            hover_range(&long, SESSION_COLUMN_MAX, 40, 200, false, false),
+            2..2 + SESSION_COLUMN_MAX,
+            "a hover marks the session name"
+        );
         let listed = pane_row(
             &long,
             SESSION_COLUMN_MAX,
@@ -3703,7 +4001,7 @@ mod tests {
         assert_eq!(by_session.content().trim_end(), "✗ pane2");
         assert!(level(&by_session, SESSION_EMPHASIS).is_empty());
         let mut inbox = mixed();
-        inbox.live_layout = LiveLayout::compute(0, 1, 120, 30, 1);
+        inbox.live_layout = LiveLayout::compute(0, 1, 120, 30);
         for line in inbox.block_lines(40, 200, false) {
             if let BlockLine::Item { text, .. } = line {
                 assert!(
@@ -4036,7 +4334,7 @@ mod tests {
             item("web", 2, AttentionStatus::Done, 200),
             item("docs", 3, AttentionStatus::Done, 100),
         ]));
-        render(&mut inbox, 88, 15, false);
+        view(&mut inbox, &[key("web", 2), key("docs", 3), key("here", 4)]);
         let mut sessions_left = with_sessions(vec![], &["docs", "web"]);
         inbox.update_global(sessions_left.clone());
         assert_eq!(sessions_in_order(&inbox), vec!["here", "web", "docs"]);
@@ -4079,8 +4377,15 @@ mod tests {
         assert!(sessions_in_order(&inbox).is_empty());
     }
 
+    fn view(inbox: &mut Inbox, keys: &[ItemKey]) {
+        for key in keys {
+            inbox.select_item(key.clone());
+            render(inbox, 88, 15, false);
+        }
+    }
+
     #[test]
-    fn a_working_or_needs_you_item_that_goes_away_is_dropped_while_done_and_failed_are_held() {
+    fn only_an_item_shown_live_is_held_once_it_goes_away_whatever_its_status() {
         let mut inbox = Inbox::default();
         inbox.update_global(global(vec![
             item("api", 1, AttentionStatus::NeedsYou, 400),
@@ -4088,17 +4393,21 @@ mod tests {
             item("web", 3, AttentionStatus::Done, 200),
             item("docs", 4, AttentionStatus::Failed, 100),
         ]));
-        render(&mut inbox, 88, 15, false);
+        view(&mut inbox, &[key("api", 1)]);
         inbox.update_global(with_sessions(
             vec![item("work", 2, AttentionStatus::Quiet, 300)],
             &["api", "web", "docs"],
         ));
-        assert_eq!(sessions_in_order(&inbox), vec!["docs", "web"]);
-        assert!(inbox.is_held(&key("web", 3)));
-        assert!(inbox.is_held(&key("docs", 4)));
-        assert!(!inbox.is_held(&key("api", 1)));
+        assert_eq!(sessions_in_order(&inbox), vec!["api"]);
+        assert!(inbox.is_held(&key("api", 1)));
+        assert!(!inbox.is_held(&key("web", 3)));
+        assert!(!inbox.is_held(&key("docs", 4)));
         assert!(!inbox.is_held(&key("work", 2)));
-        assert!(inbox.find(&key("api", 1)).is_none());
+        assert!(inbox.find(&key("web", 3)).is_none());
+        assert!(inbox.find(&key("docs", 4)).is_none());
+        assert_eq!(inbox.counted_count(), 0);
+        assert!(inbox.has_rows(), "the read item still counts as a row");
+        assert_eq!(inbox.selected_item().map(ItemKey::of), Some(key("api", 1)));
         assert!(
             !inbox.has_working_items(),
             "no Working row or spinner is left"
@@ -4108,11 +4417,83 @@ mod tests {
             "Went Quiet"
         );
         inbox.update_global(with_sessions(
-            vec![item("api", 1, AttentionStatus::NeedsYou, 400)],
+            vec![item("api", 1, AttentionStatus::NeedsYou, 500)],
             &["work", "web", "docs"],
         ));
+        assert!(!inbox.is_held(&key("api", 1)));
         assert!(inbox.find(&key("work", 2)).is_none());
-        assert_eq!(sessions_in_order(&inbox), vec!["api", "docs", "web"]);
+        assert_eq!(sessions_in_order(&inbox), vec!["api"]);
+    }
+
+    #[test]
+    fn an_item_with_new_output_shown_live_stays_listed_until_the_inbox_closes() {
+        let mut inbox = Inbox::default();
+        inbox.update_global(global(vec![
+            item("api", 1, AttentionStatus::NeedsYou, 300),
+            item("log", 2, AttentionStatus::NewOutput, 200),
+        ]));
+        inbox.toggle_show_quiet();
+        view(&mut inbox, &[key("log", 2)]);
+        inbox.update_global(with_sessions(
+            vec![item("api", 1, AttentionStatus::NeedsYou, 300)],
+            &["log"],
+        ));
+        inbox.toggle_show_quiet();
+        assert!(inbox.is_held(&key("log", 2)));
+        assert_eq!(sessions_in_order(&inbox), vec!["api", "log"]);
+        assert_eq!(inbox.selected_item().map(ItemKey::of), Some(key("log", 2)));
+        assert_eq!(inbox.quiet_count(), 0);
+        assert!(inbox.forget_listed(), "closing the inbox lets it go");
+        assert_eq!(sessions_in_order(&inbox), vec!["api"]);
+    }
+
+    #[test]
+    fn the_newest_unread_item_is_picked_over_a_held_one() {
+        let mut inbox = Inbox::default();
+        inbox.update_global(global(vec![
+            item("api", 1, AttentionStatus::NeedsYou, 300),
+            item("web", 2, AttentionStatus::Done, 200),
+        ]));
+        view(&mut inbox, &[key("api", 1)]);
+        inbox.update_global(with_sessions(
+            vec![item("web", 2, AttentionStatus::Done, 200)],
+            &["api"],
+        ));
+        assert!(inbox.is_held(&key("api", 1)));
+        assert!(inbox.select_newest_counted());
+        assert_eq!(inbox.selected_item().map(ItemKey::of), Some(key("web", 2)));
+    }
+
+    #[test]
+    fn a_pane_of_this_session_is_shown_without_resizing_until_z_allows_it() {
+        let sent = |inbox: &Inbox| inbox.live_view_sent.as_ref().and_then(|v| v.resize_allowed);
+        let mut inbox = sample();
+        inbox.current_session = Some("here".to_owned());
+        inbox.select_item(key("here", 2));
+        render(&mut inbox, 88, 15, false);
+        assert_eq!(sent(&inbox), Some(false));
+        assert!(!inbox.current_resize_allowed());
+        inbox.toggle_resize();
+        render(&mut inbox, 88, 15, false);
+        assert_eq!(sent(&inbox), Some(true));
+        inbox.select_item(key("api", 1));
+        render(&mut inbox, 88, 15, false);
+        assert_eq!(
+            sent(&inbox),
+            Some(false),
+            "other sessions are not resized while browsing either"
+        );
+    }
+
+    #[test]
+    fn the_sessions_tab_never_shows_or_types_into_the_inbox_selection() {
+        let mut inbox = sample();
+        render(&mut inbox, 88, 15, false);
+        assert!(inbox.live_view_target().is_some());
+        inbox.tab = BrowserTab::Sessions;
+        assert_eq!(inbox.live_view_target(), None);
+        inbox.apply_live_view_status(live_status(None, true));
+        assert_eq!(inbox.capture_target, None);
     }
 
     #[test]
@@ -4194,8 +4575,10 @@ mod tests {
             item("docs", 4, AttentionStatus::Done, 200),
             item("api", 5, AttentionStatus::Done, 100),
         ]));
-        inbox.select_item(key("docs", 4));
-        render(&mut inbox, 88, 15, false);
+        view(
+            &mut inbox,
+            &[key("web", 2), key("web", 3), key("api", 5), key("docs", 4)],
+        );
         let all_seen = with_sessions(vec![], &["web", "docs", "api"]);
         inbox.update_global(all_seen.clone());
         assert_eq!(sessions_in_order(&inbox), vec!["web", "web", "docs", "api"]);
@@ -4260,7 +4643,7 @@ mod tests {
             item("zed", 6, AttentionStatus::Done, 150),
             item("build", 5, AttentionStatus::Working, 100),
         ]));
-        render(&mut inbox, 88, 15, false);
+        view(&mut inbox, &[key("docs", 3), key("web", 2)]);
         inbox.update_global(with_sessions(
             vec![
                 item("api", 4, AttentionStatus::Done, 200),

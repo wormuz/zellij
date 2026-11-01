@@ -1437,6 +1437,16 @@ impl Grid {
     pub fn render_full_viewport(&mut self) {
         self.output_buffer.update_all_lines();
     }
+    pub fn reset_input_modes_left_by_lost_guest(&mut self) {
+        if self.alternate_screen_state.is_none() {
+            return;
+        }
+        self.mouse_mode = MouseMode::NoEncoding;
+        self.mouse_tracking = MouseTracking::Off;
+        self.focus_event_tracking = false;
+        self.supports_kitty_keyboard_protocol = false;
+        self.color_palette_notification_enabled = false;
+    }
     pub fn update_line_for_rendering(&mut self, line_index: usize) {
         self.output_buffer.update_line(line_index);
     }
@@ -4094,7 +4104,7 @@ impl Grid {
     }
 
     fn handle_reported_cwd(&mut self, cwd: zellij_utils::attention::ReportedCwd) {
-        if cwd.is_local {
+        if cwd.is_local && !crate::attention::shell::is_network_path(&cwd.path) {
             self.pending_osc7_cwd = Some(std::path::PathBuf::from(&cwd.path));
         }
         self.shell_reports

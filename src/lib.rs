@@ -3,7 +3,7 @@ pub mod commands;
 mod tests;
 
 use zellij_utils::{
-    cli::{CliAction, CliArgs, Command, Sessions, WindowArgs},
+    cli::{CliAction, CliArgs, Command, Sessions, TerminalArgs},
     consts::{create_config_and_cache_folders, VERSION},
     data::UnblockCondition,
     distribution::set_distribution,
@@ -38,7 +38,7 @@ pub fn run_zellij() {
 
 pub(crate) fn socket_dir_override(opts: &CliArgs) -> Option<&std::path::Path> {
     match opts.command.as_ref() {
-        Some(Command::Window(WindowArgs {
+        Some(Command::Terminal(TerminalArgs {
             socket_dir: Some(socket_dir),
             ..
         })) => Some(socket_dir.as_path()),
@@ -61,6 +61,11 @@ fn main() {
         }
     }
 
+    if let Some(Command::Terminal(terminal_args)) = opts.command.clone() {
+        commands::start_terminal(terminal_args, opts);
+        std::process::exit(0);
+    }
+
     {
         let config = Config::try_from(&opts).ok();
         if let Some(Command::Action(cli_action)) = opts.command {
@@ -73,10 +78,6 @@ fn main() {
         }
         if let Some(Command::Prompt(prompt_cli)) = opts.command {
             commands::prompt_in_session(prompt_cli, opts.session, config);
-        }
-        if let Some(Command::Window(window_args)) = opts.command.clone() {
-            commands::start_window(window_args, opts);
-            std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {
             command,
@@ -287,6 +288,8 @@ fn main() {
                 plugin_title: None,
                 popup: None,
                 popup_no_focus: false,
+                popup_capture_all_keys: false,
+                popup_outside_click: None,
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);

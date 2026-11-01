@@ -70,6 +70,13 @@ pub fn initial_panes_from_cli(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ResurrectCommand {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ResizeDirection {
     Left,
     Right,
@@ -424,6 +431,10 @@ pub enum Action {
         fg: Option<String>,
         bg: Option<String>,
     },
+    SetResurrectCommand {
+        pane_id: PaneId,
+        resurrect: Option<ResurrectCommand>,
+    },
     /// Detach session and exit
     Detach,
     /// Switch the host-terminal theme mode to dark (uses configured `theme_dark`).
@@ -599,6 +610,10 @@ pub enum Action {
         popup: Option<crate::data::PipePopupPlacement>,
         #[serde(default)]
         popup_no_focus: bool,
+        #[serde(default)]
+        popup_capture_all_keys: bool,
+        #[serde(default)]
+        popup_outside_click: Option<crate::data::OutsideClick>,
     },
     KeybindPipe {
         name: Option<String>,
@@ -791,7 +806,10 @@ pub enum Action {
     GoToNextSession,
     GoToNextAttention,
     ToggleTrayIcon,
-    OpenSessionInWindow,
+    OpenSessionInTerminal,
+    PasteFromClipboardByPaneId {
+        pane_id: PaneId,
+    },
     WaitForPaneExit {
         pane_id: PaneId,
     },
@@ -805,6 +823,16 @@ pub enum Action {
     },
     WriteKeyToPaneId {
         key_with_modifier: Option<KeyWithModifier>,
+        pane_id: PaneId,
+    },
+    ToggleBars {
+        bars: Vec<String>,
+    },
+    HideBars {
+        bars: Vec<String>,
+    },
+    ShowBars,
+    HideBarByPaneId {
         pane_id: PaneId,
     },
 }
@@ -862,6 +890,10 @@ impl Action {
             Action::IgnorePaneOutputByPaneId { .. } => vec![Action::IgnorePaneOutput],
             Action::WatchPaneByPaneId { .. } => vec![Action::WatchPane],
             Action::MuteTabByTabId { .. } => vec![Action::MuteTab],
+            Action::ShowBars => vec![Action::ToggleBars { bars: vec![] }],
+            Action::HideBars { bars } if bars.is_empty() => {
+                vec![Action::ToggleBars { bars: vec![] }]
+            },
             Action::TogglePaneInGroupByPaneId { .. } => vec![Action::TogglePaneInGroup],
             Action::StartRenamePaneByPaneId { .. } => vec![
                 Action::SwitchToMode {
@@ -1024,17 +1056,15 @@ impl Action {
                         )
                     })?;
 
-                    #[cfg(not(target_family = "wasm"))]
-                    let bytes = key
-                        .serialize_kitty()
-                        .map(|s| s.into_bytes())
-                        .unwrap_or_else(Vec::new);
-
-                    #[cfg(target_family = "wasm")]
-                    let bytes = vec![];
-
                     match &pane_id {
                         Some(pane_id_str) => {
+                            #[cfg(not(target_family = "wasm"))]
+                            let bytes = key
+                                .serialize_non_kitty()
+                                .map(|s| s.into_bytes())
+                                .unwrap_or_else(Vec::new);
+                            #[cfg(target_family = "wasm")]
+                            let bytes = vec![];
                             let parsed_pane_id = PaneId::from_str(pane_id_str)
                                 .map_err(|_| format!(
                                     "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
@@ -1046,6 +1076,13 @@ impl Action {
                             });
                         },
                         None => {
+                            #[cfg(not(target_family = "wasm"))]
+                            let bytes = key
+                                .serialize_kitty()
+                                .map(|s| s.into_bytes())
+                                .unwrap_or_else(Vec::new);
+                            #[cfg(target_family = "wasm")]
+                            let bytes = vec![];
                             actions.push(Action::Write {
                                 key_with_modifier: Some(key),
                                 bytes,
@@ -1272,6 +1309,9 @@ impl Action {
             },
             CliAction::TogglePaneFrames => Ok(vec![Action::TogglePaneFrames]),
             CliAction::SetPaneFrameStyle { style } => Ok(vec![Action::SetPaneFrameStyle(style)]),
+            CliAction::ToggleBars { bars } => Ok(vec![Action::ToggleBars { bars }]),
+            CliAction::HideBars { bars } => Ok(vec![Action::HideBars { bars }]),
+            CliAction::ShowBars => Ok(vec![Action::ShowBars]),
             CliAction::ToggleActiveSyncTab { tab_id } => match tab_id {
                 Some(id) => Ok(vec![Action::ToggleActiveSyncTabByTabId { id: id as u64 }]),
                 None => Ok(vec![Action::ToggleActiveSyncTab]),
@@ -2204,6 +2244,8 @@ impl Action {
                 plugin_title,
                 popup,
                 popup_no_focus,
+                popup_capture_all_keys,
+                popup_outside_click,
             } => {
                 let current_dir = get_current_dir();
                 let cwd = plugin_cwd
@@ -2227,6 +2269,8 @@ impl Action {
                     skip_cache,
                     popup,
                     popup_no_focus,
+                    popup_capture_all_keys,
+                    popup_outside_click,
                 }])
             },
             CliAction::ListClients => Ok(vec![Action::ListClients]),
@@ -2459,6 +2503,49 @@ impl Action {
                         pane_id_str
                     )),
                 }
+            },
+            CliAction::SetResurrectCommand {
+                pane_id,
+                cwd,
+                clear,
+                mut command,
+            } => {
+                let pane_id_str = match pane_id {
+                    Some(id) => id,
+                    None => std::env::var("ZELLIJ_PANE_ID").map_err(|_| {
+                        "No --pane-id provided and ZELLIJ_PANE_ID is not set".to_string()
+                    })?,
+                };
+                let parsed_pane_id = PaneId::from_str(&pane_id_str).map_err(|_| {
+                    format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1) or a terminal pane id (eg. terminal_1)",
+                        pane_id_str
+                    )
+                })?;
+                if matches!(parsed_pane_id, PaneId::Plugin(_)) {
+                    return Err(format!(
+                        "Pane {} is a plugin pane, a resurrect command can only be set for terminal panes",
+                        pane_id_str
+                    ));
+                }
+                let resurrect = if clear {
+                    None
+                } else {
+                    if command.is_empty() {
+                        return Err("A command is required unless --clear is given".to_string());
+                    }
+                    let cwd = cwd.map(|cwd| get_current_dir().join(cwd));
+                    let program = PathBuf::from(command.remove(0));
+                    Some(ResurrectCommand {
+                        command: program,
+                        args: command,
+                        cwd,
+                    })
+                };
+                Ok(vec![Action::SetResurrectCommand {
+                    pane_id: parsed_pane_id,
+                    resurrect,
+                }])
             },
             CliAction::Detach => Ok(vec![Action::Detach]),
             CliAction::SetDarkTheme => Ok(vec![Action::SetDarkTheme]),
@@ -4966,5 +5053,86 @@ mod tests {
             },
             _ => panic!("Expected NewFloatingPluginPane action"),
         }
+    }
+
+    fn set_resurrect_command_from_cli(
+        pane_id: Option<&str>,
+        cwd: Option<&str>,
+        clear: bool,
+        command: Vec<&str>,
+    ) -> Result<Vec<Action>, String> {
+        let cli_action = CliAction::SetResurrectCommand {
+            pane_id: pane_id.map(|p| p.to_string()),
+            cwd: cwd.map(PathBuf::from),
+            clear,
+            command: command.into_iter().map(|c| c.to_string()).collect(),
+        };
+        Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+    }
+
+    #[test]
+    fn test_set_resurrect_command_with_pane_id() {
+        let actions = set_resurrect_command_from_cli(
+            Some("terminal_4"),
+            None,
+            false,
+            vec!["opencode", "-s", "ses_abc"],
+        )
+        .unwrap();
+        assert_eq!(
+            actions,
+            vec![Action::SetResurrectCommand {
+                pane_id: PaneId::Terminal(4),
+                resurrect: Some(ResurrectCommand {
+                    command: PathBuf::from("opencode"),
+                    args: vec!["-s".to_string(), "ses_abc".to_string()],
+                    cwd: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_set_resurrect_command_resolves_cwd() {
+        let actions =
+            set_resurrect_command_from_cli(Some("4"), Some("project"), false, vec!["opencode"])
+                .unwrap();
+        assert_eq!(
+            actions,
+            vec![Action::SetResurrectCommand {
+                pane_id: PaneId::Terminal(4),
+                resurrect: Some(ResurrectCommand {
+                    command: PathBuf::from("opencode"),
+                    args: vec![],
+                    cwd: Some(PathBuf::from("/tmp/project")),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_set_resurrect_command_clear() {
+        let actions =
+            set_resurrect_command_from_cli(Some("terminal_4"), None, true, vec![]).unwrap();
+        assert_eq!(
+            actions,
+            vec![Action::SetResurrectCommand {
+                pane_id: PaneId::Terminal(4),
+                resurrect: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_set_resurrect_command_rejects_plugin_pane() {
+        let result =
+            set_resurrect_command_from_cli(Some("plugin_2"), None, false, vec!["opencode"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_resurrect_command_rejects_malformed_pane_id() {
+        let result = set_resurrect_command_from_cli(Some("nope"), None, false, vec!["opencode"]);
+        assert!(result.is_err());
     }
 }

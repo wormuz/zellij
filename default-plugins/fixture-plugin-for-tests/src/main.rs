@@ -46,7 +46,7 @@ fn run_session_pane_command(command: &str, session: &str, pane: PaneId) {
     match command {
         "mark_seen" => mark_session_pane_seen(session, pane),
         "mark_all_seen" => mark_all_seen(Some(session)),
-        "open_window" => open_session_window(session, true),
+        "open_window" => open_session_terminal(session, true),
         "write" => write_to_session_pane(session, pane, b"typed by the fixture".to_vec()),
         "send_key" => send_key_to_session_pane(session, pane, KeyWithModifier::new(BareKey::Enter)),
         "mute" => toggle_session_pane_mute(session, pane),
@@ -369,6 +369,10 @@ impl ZellijPlugin for State {
             .get("subscribe_nested_session_events")
             .map(|v| v == "true")
             .unwrap_or(false);
+        let should_subscribe_settings_entries = configuration
+            .get("subscribe_settings_entries")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         self.configuration = configuration;
         subscribe(&[
             EventType::InputReceived,
@@ -413,6 +417,9 @@ impl ZellijPlugin for State {
                 EventType::NestedSessionModeUpdate,
                 EventType::NestedSessionEnded,
             ]);
+        }
+        if should_subscribe_settings_entries {
+            subscribe(&[EventType::PluginSettingsEntries]);
         }
         watch_filesystem();
     }
@@ -1323,6 +1330,16 @@ impl ZellijPlugin for State {
                                 Err(e) => format!("Nested keybinds error: {:?}", e),
                             });
                     }
+                },
+                BareKey::Char('n')
+                    if key.has_only_modifiers(&[KeyModifier::Ctrl, KeyModifier::Alt]) =>
+                {
+                    register_settings_entry("Fixture settings");
+                },
+                BareKey::Char('o')
+                    if key.has_only_modifiers(&[KeyModifier::Ctrl, KeyModifier::Alt]) =>
+                {
+                    unregister_settings_entry();
                 },
                 _ => {},
             },

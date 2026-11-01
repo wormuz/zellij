@@ -170,6 +170,7 @@ pub struct TerminalPane {
     forward_paused: bool,
     nested_guest: bool,
     guest_modal: HashMap<ClientId, usize>,
+    guest_modal_hover: HashMap<ClientId, usize>,
     guest_choice_indicators: HashMap<ClientId, GuestChoiceIndicator>,
     guest_session_name: Option<String>,
     guest_modal_shortcuts: GuestModalShortcuts,
@@ -647,6 +648,10 @@ impl Pane for TerminalPane {
             // TODO: use and_then or something?
             Some(last_frame) => {
                 if &frame != last_frame {
+                    if frame.omits_title() && !last_frame.omits_title() {
+                        self.grid.update_line_for_rendering(0);
+                        self.set_should_render(true);
+                    }
                     if !self.borderless {
                         let frame_output = frame.render().with_context(err_context)?;
                         self.frame.insert(client_id, frame);
@@ -867,6 +872,7 @@ impl Pane for TerminalPane {
     }
 
     fn clear_guest_modal(&mut self, client_id: ClientId) {
+        self.guest_modal_hover.remove(&client_id);
         if self.guest_modal.remove(&client_id).is_some() {
             self.render_full_viewport();
             self.set_should_render(true);
@@ -874,6 +880,7 @@ impl Pane for TerminalPane {
     }
 
     fn clear_all_guest_modals(&mut self) {
+        self.guest_modal_hover.clear();
         if !self.guest_modal.is_empty() {
             self.guest_modal.clear();
             self.render_full_viewport();
@@ -883,6 +890,27 @@ impl Pane for TerminalPane {
 
     fn guest_modal_selection(&self, client_id: ClientId) -> Option<usize> {
         self.guest_modal.get(&client_id).copied()
+    }
+
+    fn guest_modal_hover(&self, client_id: ClientId) -> Option<usize> {
+        self.guest_modal_hover.get(&client_id).copied()
+    }
+
+    fn set_guest_modal_hover(&mut self, client_id: ClientId, option: Option<usize>) -> bool {
+        let option = option.filter(|_| self.guest_modal.contains_key(&client_id));
+        if self.guest_modal_hover.get(&client_id).copied() == option {
+            return false;
+        }
+        match option {
+            Some(option) => {
+                self.guest_modal_hover.insert(client_id, option);
+            },
+            None => {
+                self.guest_modal_hover.remove(&client_id);
+            },
+        }
+        self.set_should_render(true);
+        true
     }
 
     fn has_guest_modal_for_any_client(&self) -> bool {
@@ -972,6 +1000,9 @@ impl Pane for TerminalPane {
 
     fn drain_prompt_return(&mut self) -> bool {
         std::mem::take(&mut self.grid.pending_prompt_return)
+    }
+    fn reset_input_modes_left_by_lost_guest(&mut self) {
+        self.grid.reset_input_modes_left_by_lost_guest();
     }
 
     fn set_selection_options(&mut self, osc133_command_selection: bool, word_separators: &str) {
@@ -1644,6 +1675,7 @@ impl TerminalPane {
             forward_paused: false,
             nested_guest: false,
             guest_modal: HashMap::new(),
+            guest_modal_hover: HashMap::new(),
             guest_choice_indicators: HashMap::new(),
             guest_session_name: None,
             guest_modal_shortcuts: GuestModalShortcuts::default(),

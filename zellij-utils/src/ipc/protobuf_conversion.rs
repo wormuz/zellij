@@ -7,9 +7,9 @@ use crate::{
         client_to_server_msg, server_to_client_msg, ActionMsg, AdoptSessionHistoryMsg,
         AttachClientMsg, AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg,
         ClientExitedMsg, ClientPaneMirrorMsg, ClientToServerMsg as ProtoClientToServerMsg,
-        ColorRegistersMsg, ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg,
-        DesktopNotificationResponseMsg, DetachSessionMsg, EmitNestedSessionFrameMsg, ExitMsg,
-        ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
+        ClipboardPasteSupportMsg, ColorRegistersMsg, ConfigFileUpdatedMsg, ConnStatusMsg,
+        ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg, EmitNestedSessionFrameMsg,
+        ExitMsg, ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
         FontFamiliesMsg, ForegroundColorMsg, ForwardQueryToHostMsg, ForwardedReplyFromHostMsg,
         HostProgramStatus as ProtoHostProgramStatus, HostProgramStatusMsg,
         HostTerminalFocusChangedMsg, HostTerminalThemeChangedMsg,
@@ -18,19 +18,20 @@ use crate::{
         KittyZlibSupportMsg, LayoutMetadata as ProtoLayoutMetadata, LogErrorMsg, LogMsg,
         MobileActivePaneMsg, MobilePaneMsg, MobileRenderPrefsMsg, MobileSessionMsg, MobileSizeMsg,
         MobileStateMsg, MobileTabMsg, NestedSessionFrameFromHostMsg,
-        PaneMetadata as ProtoPaneMetadata, PaneRenderUpdateMsg, PeerAttentionChangedMsg,
-        QueryTerminalSizeMsg, RenamedSessionMsg, RenderFrameAckMsg, RenderFrameMsg, RenderMsg,
-        RequestSessionAttentionMsg, RequestSessionListMsg, RequestSessionPreviewMsg,
-        ServerPaneMirrorMsg, ServerToClientMsg as ProtoServerToClientMsg, SessionAttentionMsg,
-        SessionPreviewMsg, SetMobileRenderPreferencesMsg, SetSoftKeyboardMsg, SixelSupportMsg,
-        SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, StructuredRenderSupportMsg,
-        SubscribeToPaneRendersMsg, SubscribedPaneClosedMsg, SwitchSessionMsg,
-        TabMetadata as ProtoTabMetadata, TerminalPixelDimensionsMsg, TerminalResizeMsg,
-        UnblockCliPipeInputMsg, UnblockInputThreadMsg, WebServerStartedMsg, WindowSettingsMsg,
+        PaneMetadata as ProtoPaneMetadata, PaneRenderUpdateMsg, PasteFromClipboardMsg,
+        PeerAttentionChangedMsg, QueryTerminalSizeMsg, RenamedSessionMsg, RenderFrameAckMsg,
+        RenderFrameMsg, RenderMsg, RequestSessionAttentionMsg, RequestSessionListMsg,
+        RequestSessionPreviewMsg, ServerPaneMirrorMsg, ServerToClientMsg as ProtoServerToClientMsg,
+        SessionAttentionMsg, SessionPreviewMsg, SetMobileRenderPreferencesMsg, SetSoftKeyboardMsg,
+        SixelSupportMsg, SoftKeyboardVisibilityChangedMsg, StartWebServerMsg,
+        StructuredRenderSupportMsg, SubscribeToPaneRendersMsg, SubscribedPaneClosedMsg,
+        SwitchSessionMsg, TabMetadata as ProtoTabMetadata, TerminalPixelDimensionsMsg,
+        TerminalResizeMsg, TerminalSettingsMsg, UnblockCliPipeInputMsg, UnblockInputThreadMsg,
+        WebServerStartedMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
-    input::window::WindowSettings,
+    input::terminal::TerminalSettings,
     ipc::{
         ClientToServerMsg, ColorRegister, ExitReason, MobileActivePanePayload, MobilePanePayload,
         MobileRenderPrefsPayload, MobileSessionPayload, MobileSizePayload, MobileStatePayload,
@@ -225,6 +226,13 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                     supported,
                 })
             },
+            ClientToServerMsg::ClipboardPasteSupport {
+                supported,
+                shortcut,
+            } => client_to_server_msg::Message::ClipboardPasteSupport(ClipboardPasteSupportMsg {
+                supported,
+                shortcut,
+            }),
             ClientToServerMsg::RenderFrameAck { seq } => {
                 client_to_server_msg::Message::RenderFrameAck(RenderFrameAckMsg { seq })
             },
@@ -451,6 +459,12 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                     supported: msg.supported,
                 })
             },
+            Some(client_to_server_msg::Message::ClipboardPasteSupport(msg)) => {
+                Ok(ClientToServerMsg::ClipboardPasteSupport {
+                    supported: msg.supported,
+                    shortcut: msg.shortcut,
+                })
+            },
             Some(client_to_server_msg::Message::RenderFrameAck(msg)) => {
                 Ok(ClientToServerMsg::RenderFrameAck { seq: msg.seq })
             },
@@ -536,8 +550,8 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             ServerToClientMsg::ConfigFileUpdated => {
                 server_to_client_msg::Message::ConfigFileUpdated(ConfigFileUpdatedMsg {})
             },
-            ServerToClientMsg::WindowSettingsChanged { settings } => {
-                server_to_client_msg::Message::WindowSettings(WindowSettingsMsg {
+            ServerToClientMsg::TerminalSettingsChanged { settings } => {
+                server_to_client_msg::Message::TerminalSettings(TerminalSettingsMsg {
                     settings_json: settings.to_json().unwrap_or_default(),
                 })
             },
@@ -575,6 +589,11 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             }),
             ServerToClientMsg::SetSoftKeyboard { on } => {
                 server_to_client_msg::Message::SetSoftKeyboard(SetSoftKeyboardMsg { on })
+            },
+            ServerToClientMsg::PasteFromClipboard { pane_id } => {
+                server_to_client_msg::Message::PasteFromClipboard(PasteFromClipboardMsg {
+                    pane_id: pane_id.map(Into::into),
+                })
             },
             ServerToClientMsg::EmitNestedSessionFrame { payload_bytes } => {
                 server_to_client_msg::Message::EmitNestedSessionFrame(EmitNestedSessionFrameMsg {
@@ -821,10 +840,10 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
             Some(server_to_client_msg::Message::ConfigFileUpdated(_)) => {
                 Ok(ServerToClientMsg::ConfigFileUpdated)
             },
-            Some(server_to_client_msg::Message::WindowSettings(msg)) => {
-                let settings = WindowSettings::from_json(&msg.settings_json)
+            Some(server_to_client_msg::Message::TerminalSettings(msg)) => {
+                let settings = TerminalSettings::from_json(&msg.settings_json)
                     .map_err(|e| anyhow!("Unreadable window settings: {}", e))?;
-                Ok(ServerToClientMsg::WindowSettingsChanged {
+                Ok(ServerToClientMsg::TerminalSettingsChanged {
                     settings: Box::new(settings),
                 })
             },
@@ -861,6 +880,11 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
             },
             Some(server_to_client_msg::Message::SetSoftKeyboard(msg)) => {
                 Ok(ServerToClientMsg::SetSoftKeyboard { on: msg.on })
+            },
+            Some(server_to_client_msg::Message::PasteFromClipboard(msg)) => {
+                Ok(ServerToClientMsg::PasteFromClipboard {
+                    pane_id: msg.pane_id.map(TryInto::try_into).transpose()?,
+                })
             },
             Some(server_to_client_msg::Message::EmitNestedSessionFrame(msg)) => {
                 Ok(ServerToClientMsg::EmitNestedSessionFrame {
@@ -1171,6 +1195,16 @@ impl From<crate::input::options::Options>
             session_indicator: options.session_indicator,
             swap_layout_notification: options.swap_layout_notification,
             on_quit: options.on_quit.map(|on_quit| on_quit.as_str().to_owned()),
+            bars_hidden_on_start: options.bars_hidden_on_start.as_ref().map(|hidden_bars| {
+                let names = hidden_bars.names();
+                if names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    names.join(",")
+                }
+            }),
+            hidden_bars_notification: options.hidden_bars_notification,
+            mode_hints_when_bars_hidden: options.mode_hints_when_bars_hidden,
             show_startup_tips: options.show_startup_tips,
             show_release_notes: options.show_release_notes,
             advanced_mouse_actions: options.advanced_mouse_actions,
@@ -1330,6 +1364,16 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
                         .map_err(|e| anyhow!(e))
                 })
                 .transpose()?,
+            bars_hidden_on_start: options
+                .bars_hidden_on_start
+                .map(|names| {
+                    names
+                        .parse::<crate::data::HiddenBars>()
+                        .map_err(|e| anyhow!(e))
+                })
+                .transpose()?,
+            hidden_bars_notification: options.hidden_bars_notification,
+            mode_hints_when_bars_hidden: options.mode_hints_when_bars_hidden,
             show_startup_tips: options.show_startup_tips,
             show_release_notes: options.show_release_notes,
             advanced_mouse_actions: options.advanced_mouse_actions,
@@ -1453,6 +1497,8 @@ impl From<crate::input::actions::Action>
             HalfPageScrollDownByPaneIdAction,
             HalfPageScrollUpAction,
             HalfPageScrollUpByPaneIdAction,
+            HideBarByPaneIdAction,
+            HideBarsAction,
             HideFloatingPanesAction,
             IgnorePaneOutputAction,
             IgnorePaneOutputByPaneIdAction,
@@ -1493,7 +1539,7 @@ impl From<crate::input::actions::Action>
             NextSwapLayoutByTabIdAction,
             NoOpAction,
             OpenContextMenuAction,
-            OpenSessionInWindowAction,
+            OpenSessionInTerminalAction,
             OverrideLayoutAction,
             PageScrollDownAction,
             PageScrollDownByPaneIdAction,
@@ -1502,6 +1548,7 @@ impl From<crate::input::actions::Action>
             PaneIdWithPlugin,
             PaneNameInputAction,
             PasteAction,
+            PasteFromClipboardByPaneIdAction,
             PreviousSwapLayoutAction,
             PreviousSwapLayoutByTabIdAction,
             QueryTabNamesAction,
@@ -1541,6 +1588,7 @@ impl From<crate::input::actions::Action>
             SetPaneBorderlessAction,
             SetPaneColorAction,
             SetPaneFrameStyleAction,
+            ShowBarsAction,
             ShowFloatingPanesAction,
             SkipConfirmAction,
             StackPanesAction,
@@ -1554,6 +1602,7 @@ impl From<crate::input::actions::Action>
             TabNameInputAction,
             ToggleActiveSyncTabAction,
             ToggleActiveSyncTabByTabIdAction,
+            ToggleBarsAction,
             ToggleFloatingPanesAction,
             ToggleFloatingPanesByTabIdAction,
             ToggleFocusFullscreenAction,
@@ -2050,8 +2099,8 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::ToggleTrayIcon => {
                 ActionType::ToggleTrayIcon(ToggleTrayIconAction {})
             },
-            crate::input::actions::Action::OpenSessionInWindow => {
-                ActionType::OpenSessionInWindow(OpenSessionInWindowAction {})
+            crate::input::actions::Action::OpenSessionInTerminal => {
+                ActionType::OpenSessionInTerminal(OpenSessionInTerminalAction {})
             },
             crate::input::actions::Action::WaitForPaneExit { pane_id } => {
                 ActionType::WaitForPaneExit(WaitForPaneExitAction {
@@ -2098,6 +2147,23 @@ impl From<crate::input::actions::Action>
             },
             crate::input::actions::Action::MuteTabByTabId { id } => {
                 ActionType::MuteTabByTabId(MuteTabByTabIdAction { id })
+            },
+            crate::input::actions::Action::ToggleBars { bars } => {
+                ActionType::ToggleBars(ToggleBarsAction { bars })
+            },
+            crate::input::actions::Action::HideBars { bars } => {
+                ActionType::HideBars(HideBarsAction { bars })
+            },
+            crate::input::actions::Action::ShowBars => ActionType::ShowBars(ShowBarsAction {}),
+            crate::input::actions::Action::HideBarByPaneId { pane_id } => {
+                ActionType::HideBarByPaneId(HideBarByPaneIdAction {
+                    pane_id: Some(pane_id.into()),
+                })
+            },
+            crate::input::actions::Action::PasteFromClipboardByPaneId { pane_id } => {
+                ActionType::PasteFromClipboardByPaneId(PasteFromClipboardByPaneIdAction {
+                    pane_id: Some(pane_id.into()),
+                })
             },
             crate::input::actions::Action::ToggleSessionCard => {
                 ActionType::ToggleSessionCard(ToggleSessionCardAction {})
@@ -2349,6 +2415,8 @@ impl From<crate::input::actions::Action>
                 pane_title,
                 popup,
                 popup_no_focus,
+                popup_capture_all_keys,
+                popup_outside_click,
             } => ActionType::CliPipe(CliPipeAction {
                 pipe_id,
                 name,
@@ -2368,6 +2436,8 @@ impl From<crate::input::actions::Action>
                 pane_title,
                 popup: popup.map(|p| p.to_string()),
                 popup_no_focus,
+                popup_capture_all_keys,
+                popup_outside_click: popup_outside_click.map(|o| o.to_string()),
             }),
             crate::input::actions::Action::KeybindPipe {
                 name,
@@ -2485,6 +2555,20 @@ impl From<crate::input::actions::Action>
                     fg,
                     bg,
                 })
+            },
+            crate::input::actions::Action::SetResurrectCommand { pane_id, resurrect } => {
+                ActionType::SetResurrectCommand(
+                    crate::client_server_contract::client_server_contract::SetResurrectCommandAction {
+                        pane_id: Some(pane_id.into()),
+                        resurrect: resurrect.map(|r| {
+                            crate::client_server_contract::client_server_contract::ResurrectCommand {
+                                command: r.command.to_string_lossy().into_owned(),
+                                args: r.args,
+                                cwd: r.cwd.map(|c| c.to_string_lossy().into_owned()),
+                            }
+                        }),
+                    },
+                )
             },
             // Pane-targeting CLI-only variants
             crate::input::actions::Action::ScrollUpByPaneId { pane_id } => {
@@ -3104,8 +3188,8 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 Ok(crate::input::actions::Action::GoToNextAttention)
             },
             ActionType::ToggleTrayIcon(_) => Ok(crate::input::actions::Action::ToggleTrayIcon),
-            ActionType::OpenSessionInWindow(_) => {
-                Ok(crate::input::actions::Action::OpenSessionInWindow)
+            ActionType::OpenSessionInTerminal(_) => {
+                Ok(crate::input::actions::Action::OpenSessionInTerminal)
             },
             ActionType::WaitForPaneExit(a) => Ok(crate::input::actions::Action::WaitForPaneExit {
                 pane_id: a
@@ -3159,6 +3243,25 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             },
             ActionType::MuteTabByTabId(a) => {
                 Ok(crate::input::actions::Action::MuteTabByTabId { id: a.id })
+            },
+            ActionType::ToggleBars(a) => {
+                Ok(crate::input::actions::Action::ToggleBars { bars: a.bars })
+            },
+            ActionType::HideBars(a) => Ok(crate::input::actions::Action::HideBars { bars: a.bars }),
+            ActionType::ShowBars(_) => Ok(crate::input::actions::Action::ShowBars),
+            ActionType::HideBarByPaneId(a) => Ok(crate::input::actions::Action::HideBarByPaneId {
+                pane_id: a
+                    .pane_id
+                    .ok_or_else(|| anyhow!("HideBarByPaneId missing pane_id"))?
+                    .try_into()?,
+            }),
+            ActionType::PasteFromClipboardByPaneId(a) => {
+                Ok(crate::input::actions::Action::PasteFromClipboardByPaneId {
+                    pane_id: a
+                        .pane_id
+                        .ok_or_else(|| anyhow!("PasteFromClipboardByPaneId missing pane_id"))?
+                        .try_into()?,
+                })
             },
             ActionType::ToggleSessionCard(_) => {
                 Ok(crate::input::actions::Action::ToggleSessionCard)
@@ -3435,6 +3538,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     .popup
                     .and_then(|p| p.parse::<crate::data::PipePopupPlacement>().ok()),
                 popup_no_focus: cli_pipe_action.popup_no_focus,
+                popup_capture_all_keys: cli_pipe_action.popup_capture_all_keys,
+                popup_outside_click: cli_pipe_action
+                    .popup_outside_click
+                    .and_then(|o| o.parse::<crate::data::OutsideClick>().ok()),
             }),
             ActionType::KeybindPipe(keybind_pipe_action) => {
                 Ok(crate::input::actions::Action::KeybindPipe {
@@ -3551,6 +3658,21 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .try_into()?,
                     fg: set_pane_color_action.fg,
                     bg: set_pane_color_action.bg,
+                })
+            },
+            ActionType::SetResurrectCommand(a) => {
+                Ok(crate::input::actions::Action::SetResurrectCommand {
+                    pane_id: a
+                        .pane_id
+                        .ok_or_else(|| anyhow!("SetResurrectCommand missing pane_id"))?
+                        .try_into()?,
+                    resurrect: a
+                        .resurrect
+                        .map(|r| crate::input::actions::ResurrectCommand {
+                            command: PathBuf::from(r.command),
+                            args: r.args,
+                            cwd: r.cwd.map(PathBuf::from),
+                        }),
                 })
             },
             // Pane-targeting CLI-only variants

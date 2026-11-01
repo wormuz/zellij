@@ -2,7 +2,7 @@
 use crate::{
     data::{ClientId, ConnectToSession, HostTerminalThemeMode, KeyWithModifier, PaneId, Style},
     errors::{prelude::*, ErrorContext},
-    input::{actions::Action, cli_assets::CliAssets, window::WindowSettings},
+    input::{actions::Action, cli_assets::CliAssets, terminal::TerminalSettings},
     pane_size::{Size, SizeInPixels},
 };
 use interprocess::local_socket::Stream as LocalSocketStream;
@@ -270,6 +270,10 @@ pub enum ClientToServerMsg {
     StructuredRenderSupport {
         supported: bool,
     },
+    ClipboardPasteSupport {
+        supported: bool,
+        shortcut: Option<String>,
+    },
     RenderFrameAck {
         seq: u64,
     },
@@ -319,13 +323,16 @@ pub enum ServerToClientMsg {
     SetSoftKeyboard {
         on: bool,
     },
+    PasteFromClipboard {
+        pane_id: Option<PaneId>,
+    },
     StartWebServer,
     RenamedSession {
         name: String,
     },
     ConfigFileUpdated,
-    WindowSettingsChanged {
-        settings: Box<WindowSettings>,
+    TerminalSettingsChanged {
+        settings: Box<TerminalSettings>,
     },
     HostTerminalThemeChanged {
         mode: HostTerminalThemeMode,

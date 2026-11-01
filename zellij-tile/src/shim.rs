@@ -1059,29 +1059,29 @@ pub fn mark_all_seen(session_name: Option<&str>) {
     });
 }
 
-pub fn open_session_window(session_name: &str, new_window: bool) {
-    run_plugin_command(PluginCommand::OpenSessionWindow(
-        SessionWindowRequest::existing(session_name, None, new_window),
+pub fn open_session_terminal(session_name: &str, new_window: bool) {
+    run_plugin_command(PluginCommand::OpenSessionTerminal(
+        SessionTerminalRequest::existing(session_name, None, new_window),
     ));
 }
 
-pub fn open_session_pane_window(session_name: &str, pane_id: PaneId, new_window: bool) {
-    run_plugin_command(PluginCommand::OpenSessionWindow(
-        SessionWindowRequest::existing(session_name, Some(pane_id), new_window),
+pub fn open_session_pane_terminal(session_name: &str, pane_id: PaneId, new_window: bool) {
+    run_plugin_command(PluginCommand::OpenSessionTerminal(
+        SessionTerminalRequest::existing(session_name, Some(pane_id), new_window),
     ));
 }
 
-pub fn request_session_window(request: SessionWindowRequest) {
-    run_plugin_command(PluginCommand::OpenSessionWindow(request));
+pub fn request_session_terminal(request: SessionTerminalRequest) {
+    run_plugin_command(PluginCommand::OpenSessionTerminal(request));
 }
 
-pub fn open_new_session_window(
+pub fn open_new_session_terminal(
     session_name: Option<&str>,
     layout: Option<LayoutInfo>,
     cwd: Option<PathBuf>,
 ) {
-    run_plugin_command(PluginCommand::OpenSessionWindow(
-        SessionWindowRequest::new_session(session_name, layout, cwd),
+    run_plugin_command(PluginCommand::OpenSessionTerminal(
+        SessionTerminalRequest::new_session(session_name, layout, cwd),
     ));
 }
 
@@ -1143,6 +1143,21 @@ pub fn get_saved_session_preview(name: &str) {
 
 pub fn request_desktop_integration(request: &zellij_utils::desktop_integration::Request) {
     run_plugin_command(PluginCommand::DesktopIntegration(request.to_json()));
+}
+
+/// List this plugin in the settings screen. Selecting it sends an [`OPEN_PLUGIN_SETTINGS_MESSAGE`]
+/// pipe message, with the selecting client in [`OPEN_PLUGIN_SETTINGS_CLIENT_ID_ARG`].
+///
+/// # Permissions Required
+/// * `ChangeApplicationState`
+pub fn register_settings_entry(title: &str) {
+    run_plugin_command(PluginCommand::RegisterSettingsEntry(title.to_owned()));
+}
+
+/// # Permissions Required
+/// * `ChangeApplicationState`
+pub fn unregister_settings_entry() {
+    run_plugin_command(PluginCommand::UnregisterSettingsEntry);
 }
 
 pub fn hide_self() {
@@ -1588,6 +1603,27 @@ pub fn get_nested_session_keybinds(pane_id: PaneId) -> NestedSessionKeybindsResp
 /// Toggle the UI pane frames on or off
 pub fn toggle_pane_frames() {
     let plugin_command = PluginCommand::TogglePaneFrames;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn toggle_bars(bar_names: Vec<String>) {
+    let plugin_command = PluginCommand::ToggleBars(bar_names);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn hide_bars(bar_names: Vec<String>) {
+    let plugin_command = PluginCommand::HideBars(bar_names);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn show_bars() {
+    let plugin_command = PluginCommand::ShowBars;
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };

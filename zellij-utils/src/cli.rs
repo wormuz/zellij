@@ -183,9 +183,9 @@ pub enum Command {
     )]
     #[clap(arg_required_else_help = true)]
     Prompt(PromptCli),
-    /// Open a session in zellij's own window, without a terminal emulator
-    #[clap(name = "window")]
-    Window(WindowArgs),
+    /// Open a session in the Zellij terminal, without another terminal emulator
+    #[clap(name = "terminal")]
+    Terminal(TerminalArgs),
 }
 
 #[derive(Debug, Parser, Clone, Serialize, Deserialize)]
@@ -243,6 +243,19 @@ pub struct PromptAnswerArgs {
         help = "Open the popup in the middle of the screen instead of over the calling pane (e.g. --at-center)"
     )]
     pub at_center: bool,
+
+    #[clap(
+        long,
+        help = "Send every key to the prompt, including the ones bound to Zellij actions (e.g. --capture-all-keys)"
+    )]
+    pub capture_all_keys: bool,
+
+    #[clap(
+        long,
+        value_parser,
+        help = "What a click outside the popup does: block (ignore it) or close (cancel the prompt) (e.g. --outside-click close)"
+    )]
+    pub outside_click: Option<crate::data::OutsideClick>,
 }
 
 impl PromptCli {
@@ -576,7 +589,7 @@ impl AttachArgs {
 }
 
 #[derive(Debug, Args, Default, Clone, Serialize, Deserialize)]
-pub struct WindowArgs {
+pub struct TerminalArgs {
     #[clap(flatten)]
     pub attach: AttachArgs,
 
@@ -616,9 +629,9 @@ pub struct WindowArgs {
         long,
         value_enum,
         value_name = "MODE",
-        help = "Open the window windowed, maximized, fullscreen, or the way the last one was closed (remember), overriding startup_mode in the window section of the configuration"
+        help = "Open the window windowed, maximized, fullscreen, or the way the last one was closed (remember), overriding startup_mode in the terminal section of the configuration"
     )]
-    pub startup_mode: Option<crate::input::window::StartupMode>,
+    pub startup_mode: Option<crate::input::terminal::StartupMode>,
 
     #[clap(
         long,
@@ -679,7 +692,7 @@ pub struct WindowArgs {
     pub background: bool,
 }
 
-impl WindowArgs {
+impl TerminalArgs {
     pub const DEFAULT_ROWS: usize = 40;
     pub const DEFAULT_COLS: usize = 120;
 
@@ -1406,6 +1419,26 @@ pub enum CliAction {
         #[clap(value_enum, value_parser)]
         style: PaneFrameStyle,
     },
+    #[clap(
+        about = "Show all bars if any are hidden, otherwise hide the named bars (all bars if none are named)"
+    )]
+    ToggleBars {
+        #[clap(
+            value_parser,
+            help = "Bars to hide, eg. tab-bar, status-bar, compact-bar, a plugin alias or location, or all"
+        )]
+        bars: Vec<String>,
+    },
+    #[clap(about = "Hide the named bars (all bars if none are named) in every tab")]
+    HideBars {
+        #[clap(
+            value_parser,
+            help = "Bars to hide, eg. tab-bar, status-bar, compact-bar, a plugin alias or location, or all"
+        )]
+        bars: Vec<String>,
+    },
+    #[clap(about = "Show all hidden bars")]
+    ShowBars,
     /// Toggle between sending text commands to all panes on the current tab and normal mode.
     ToggleActiveSyncTab {
         /// Target a specific tab by ID
@@ -1869,7 +1902,7 @@ pub enum CliAction {
         #[clap(long)]
         retain_existing_terminal_panes: bool,
 
-        /// Retain existing plugin panes that do not fit with the layout default: false)
+        /// Retain existing plugin panes that do not fit with the layout (default: false)
         #[clap(long)]
         retain_existing_plugin_panes: bool,
 
@@ -2007,6 +2040,24 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
             help = "Open the --popup as an information popup that does not take key focus (e.g. --popup top-right --popup-no-focus)"
         )]
         popup_no_focus: bool,
+        #[clap(
+            long,
+            value_parser,
+            display_order(13),
+            requires("popup"),
+            conflicts_with("popup_no_focus"),
+            help = "Send every key to the --popup, including the ones bound to Zellij actions (e.g. --popup center --popup-capture-all-keys)"
+        )]
+        popup_capture_all_keys: bool,
+        #[clap(
+            long,
+            value_parser,
+            display_order(14),
+            requires("popup"),
+            conflicts_with("popup_no_focus"),
+            help = "What a click outside the --popup does: block (ignore it) or close (close the popup) (e.g. --popup mouse --popup-outside-click close)"
+        )]
+        popup_outside_click: Option<crate::data::OutsideClick>,
     },
     ListClients,
     /// List all panes in the current session
@@ -2271,6 +2322,23 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
         #[clap(long, value_parser, conflicts_with_all(&["fg", "bg"]))]
         reset: bool,
     },
+    /// Set the command a terminal pane will be resurrected with, instead of the detected one.
+    /// The command stays in effect until cleared with --clear or until the pane is closed.
+    SetResurrectCommand {
+        /// The pane_id of the terminal pane, eg. terminal_1 or 3 (equivalent to terminal_3).
+        /// Defaults to $ZELLIJ_PANE_ID if not provided.
+        #[clap(short, long, value_parser)]
+        pane_id: Option<String>,
+        /// Working directory to resurrect the pane in
+        #[clap(long, value_parser, conflicts_with("clear"))]
+        cwd: Option<PathBuf>,
+        /// Remove a previously set resurrect command
+        #[clap(long, value_parser, conflicts_with("command"))]
+        clear: bool,
+        /// The command and its arguments
+        #[clap(last(true), required_unless_present("clear"))]
+        command: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -2364,5 +2432,68 @@ mod tests {
     fn subscribe_requires_pane_id() {
         let result = try_parse(&["subscribe"]);
         assert!(result.is_err());
+    }
+
+    fn parse_set_resurrect_command(args: &[&str]) -> Result<CliAction, clap::Error> {
+        let mut full_args = vec!["action", "set-resurrect-command"];
+        full_args.extend_from_slice(args);
+        let cli = try_parse(&full_args)?;
+        match cli.command {
+            Some(Command::Action(action)) => Ok(*action),
+            other => panic!("Expected Action, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_resurrect_command_parses_command() {
+        let action = parse_set_resurrect_command(&[
+            "--pane-id",
+            "terminal_1",
+            "--cwd",
+            "/tmp",
+            "--",
+            "opencode",
+            "-s",
+            "ses_abc",
+        ])
+        .unwrap();
+        match action {
+            CliAction::SetResurrectCommand {
+                pane_id,
+                cwd,
+                clear,
+                command,
+            } => {
+                assert_eq!(pane_id, Some("terminal_1".to_string()));
+                assert_eq!(cwd, Some(PathBuf::from("/tmp")));
+                assert!(!clear);
+                assert_eq!(command, vec!["opencode", "-s", "ses_abc"]);
+            },
+            other => panic!("Expected SetResurrectCommand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_resurrect_command_parses_clear() {
+        let action = parse_set_resurrect_command(&["--clear"]).unwrap();
+        assert!(matches!(
+            action,
+            CliAction::SetResurrectCommand { clear: true, ref command, .. } if command.is_empty()
+        ));
+    }
+
+    #[test]
+    fn set_resurrect_command_rejects_clear_with_command() {
+        assert!(parse_set_resurrect_command(&["--clear", "--", "opencode"]).is_err());
+    }
+
+    #[test]
+    fn set_resurrect_command_rejects_clear_with_cwd() {
+        assert!(parse_set_resurrect_command(&["--clear", "--cwd", "/tmp"]).is_err());
+    }
+
+    #[test]
+    fn set_resurrect_command_requires_command_or_clear() {
+        assert!(parse_set_resurrect_command(&[]).is_err());
     }
 }

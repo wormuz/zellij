@@ -1,6 +1,6 @@
 //! Handles cli and configuration options
 use crate::cli::Command;
-use crate::data::{InputMode, ThemeHue, WebSharing};
+use crate::data::{HiddenBars, InputMode, ThemeHue, WebSharing};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -536,11 +536,12 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub post_command_discovery_hook: Option<String>,
 
-    /// Number of async worker tasks to spawn per active client.
+    /// Number of background threads used by `zellij attach <url>` when it connects to a session
+    /// on another machine. One set is made for that program, not one per client; the web server,
+    /// browser clients and local sessions are not affected.
     ///
-    /// Allocating few tasks may result in resource contention and lags. Small values (around 4)
-    /// should typically work best. Set to 0 to use the number of (physical) CPU cores.
-    /// NOTE: This only applies to web clients at the moment.
+    /// Most of the work runs on the main thread, so these threads are usually idle. Set to 0 to
+    /// use the number of (physical) CPU cores.
     #[clap(long)]
     pub client_async_worker_tasks: Option<usize>,
 
@@ -577,6 +578,30 @@ pub struct Options {
     )]
     #[serde(default)]
     pub on_quit: Option<OnQuit>,
+
+    #[clap(
+        long,
+        value_parser,
+        help = "Which bars a new session starts with hidden: bar names separated by commas (eg. tab-bar,status-bar), all or none. Default is none"
+    )]
+    #[serde(default)]
+    pub bars_hidden_on_start: Option<HiddenBars>,
+
+    #[clap(
+        long,
+        value_parser,
+        help = "Whether to briefly show what was hidden and how to show it again when bars are hidden (true or false), default is true"
+    )]
+    #[serde(default)]
+    pub hidden_bars_notification: Option<bool>,
+
+    #[clap(
+        long,
+        value_parser,
+        help = "Whether to show the current mode's keys in a corner while a bar that would show them is hidden (true or false), default is true"
+    )]
+    #[serde(default)]
+    pub mode_hints_when_bars_hidden: Option<bool>,
 }
 
 #[derive(ValueEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
@@ -782,6 +807,15 @@ impl Options {
             .swap_layout_notification
             .or(self.swap_layout_notification);
         let on_quit = other.on_quit.or(self.on_quit);
+        let bars_hidden_on_start = other
+            .bars_hidden_on_start
+            .or(self.bars_hidden_on_start.clone());
+        let hidden_bars_notification = other
+            .hidden_bars_notification
+            .or(self.hidden_bars_notification);
+        let mode_hints_when_bars_hidden = other
+            .mode_hints_when_bars_hidden
+            .or(self.mode_hints_when_bars_hidden);
 
         Options {
             simplified_ui,
@@ -856,6 +890,9 @@ impl Options {
             session_indicator,
             swap_layout_notification,
             on_quit,
+            bars_hidden_on_start,
+            hidden_bars_notification,
+            mode_hints_when_bars_hidden,
         }
     }
 
@@ -996,6 +1033,17 @@ impl Options {
             self.swap_layout_notification,
         );
         let on_quit = other.on_quit.or(self.on_quit);
+        let bars_hidden_on_start = other
+            .bars_hidden_on_start
+            .or(self.bars_hidden_on_start.clone());
+        let hidden_bars_notification = merge_bool(
+            other.hidden_bars_notification,
+            self.hidden_bars_notification,
+        );
+        let mode_hints_when_bars_hidden = merge_bool(
+            other.mode_hints_when_bars_hidden,
+            self.mode_hints_when_bars_hidden,
+        );
 
         Options {
             simplified_ui,
@@ -1070,6 +1118,9 @@ impl Options {
             session_indicator,
             swap_layout_notification,
             on_quit,
+            bars_hidden_on_start,
+            hidden_bars_notification,
+            mode_hints_when_bars_hidden,
         }
     }
 

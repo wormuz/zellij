@@ -25,10 +25,7 @@ use strum_macros::{Display, EnumDiscriminants, EnumIter, EnumString};
 use unicode_width::UnicodeWidthChar;
 
 #[cfg(not(target_family = "wasm"))]
-use crate::vendored::termwiz::{
-    input::KittyKeyboardFlags,
-    input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers},
-};
+use crate::vendored::termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers};
 
 pub type ClientId = u32;
 
@@ -604,18 +601,98 @@ impl KeyWithModifier {
     }
     #[cfg(not(target_family = "wasm"))]
     pub fn serialize_kitty(&self) -> Option<String> {
-        let modifiers = self.to_termwiz_modifiers();
-        let key_code_encode_modes = KeyCodeEncodeModes {
-            encoding: KeyboardEncoding::Kitty(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES),
-            // all these flags are false because they have been dealt with before this
-            // serialization
-            application_cursor_keys: false,
-            newline_mode: false,
-            modify_other_keys: None,
+        let shift = self.key_modifiers.contains(&KeyModifier::Shift);
+        let alt = self.key_modifiers.contains(&KeyModifier::Alt);
+        let ctrl = self.key_modifiers.contains(&KeyModifier::Ctrl);
+        let sup = self.key_modifiers.contains(&KeyModifier::Super);
+        let modifier_value = |shift: bool| -> u8 {
+            1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8 + 8 * sup as u8
         };
-        self.to_termwiz_keycode()
-            .encode(modifiers, key_code_encode_modes, true)
-            .ok()
+        let mods = modifier_value(shift);
+        let csi_u = |code: u32, mods: u8| {
+            if mods > 1 {
+                format!("\u{1b}[{};{}u", code, mods)
+            } else {
+                format!("\u{1b}[{}u", code)
+            }
+        };
+        let csi_letter = |letter: char| {
+            if mods > 1 {
+                format!("\u{1b}[1;{}{}", mods, letter)
+            } else {
+                format!("\u{1b}[{}", letter)
+            }
+        };
+        let ss3_or_csi_letter = |letter: char| {
+            if mods > 1 {
+                format!("\u{1b}[1;{}{}", mods, letter)
+            } else {
+                format!("\u{1b}O{}", letter)
+            }
+        };
+        let csi_tilde = |number: u8| {
+            if mods > 1 {
+                format!("\u{1b}[{};{}~", number, mods)
+            } else {
+                format!("\u{1b}[{}~", number)
+            }
+        };
+        let plain_or_csi_u = |plain: &str, code: u32| {
+            if mods > 1 {
+                csi_u(code, mods)
+            } else {
+                plain.to_owned()
+            }
+        };
+        let encoded = match self.bare_key {
+            BareKey::Char(c) if !(alt || ctrl || sup) => {
+                if shift {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_string()
+                }
+            },
+            BareKey::Char(c) => {
+                let mut lowercase = c.to_lowercase();
+                match (lowercase.next(), lowercase.next()) {
+                    (Some(lower), None) if lower != c => csi_u(lower as u32, modifier_value(true)),
+                    _ => csi_u(c as u32, mods),
+                }
+            },
+            BareKey::Enter => plain_or_csi_u("\r", 13),
+            BareKey::Tab => plain_or_csi_u("\t", 9),
+            BareKey::Backspace => plain_or_csi_u("\u{7f}", 127),
+            BareKey::Esc => csi_u(27, mods),
+            BareKey::Up => csi_letter('A'),
+            BareKey::Down => csi_letter('B'),
+            BareKey::Right => csi_letter('C'),
+            BareKey::Left => csi_letter('D'),
+            BareKey::Home => csi_letter('H'),
+            BareKey::End => csi_letter('F'),
+            BareKey::F(1) => ss3_or_csi_letter('P'),
+            BareKey::F(2) => ss3_or_csi_letter('Q'),
+            BareKey::F(3) => csi_tilde(13),
+            BareKey::F(4) => ss3_or_csi_letter('S'),
+            BareKey::F(5) => csi_tilde(15),
+            BareKey::F(6) => csi_tilde(17),
+            BareKey::F(7) => csi_tilde(18),
+            BareKey::F(8) => csi_tilde(19),
+            BareKey::F(9) => csi_tilde(20),
+            BareKey::F(10) => csi_tilde(21),
+            BareKey::F(11) => csi_tilde(23),
+            BareKey::F(12) => csi_tilde(24),
+            BareKey::F(n @ 13..=35) => csi_u(57376 + (n as u32 - 13), mods),
+            BareKey::F(_) => return None,
+            BareKey::Insert => csi_tilde(2),
+            BareKey::Delete => csi_tilde(3),
+            BareKey::PageUp => csi_tilde(5),
+            BareKey::PageDown => csi_tilde(6),
+            BareKey::PrintScreen => csi_u(57361, mods),
+            BareKey::Pause => csi_u(57362, mods),
+            BareKey::Menu => csi_u(57363, mods),
+            BareKey::CapsLock | BareKey::ScrollLock | BareKey::NumLock => return None,
+        };
+        Some(encoded)
     }
     pub fn has_no_modifiers(&self) -> bool {
         self.key_modifiers.is_empty()
@@ -1288,6 +1365,7 @@ pub enum Event {
     GlobalAttentionUpdate(crate::attention::GlobalAttention),
     SessionHistoryUpdate(crate::session_history::SessionHistoryInfo),
     DesktopIntegration(String),
+    PluginSettingsEntries(Vec<PluginSettingsEntry>),
     LiveViewStateChanged {
         target: Option<PaneAddress>,
         state: MirrorState,
@@ -1471,6 +1549,16 @@ pub struct SavedTabPreview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PluginSettingsEntry {
+    pub plugin_id: u32,
+    pub title: String,
+}
+
+pub const OPEN_PLUGIN_SETTINGS_MESSAGE: &str = "zellij:open_plugin_settings";
+
+pub const OPEN_PLUGIN_SETTINGS_CLIENT_ID_ARG: &str = "client_id";
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SavedSessionPreview {
     pub session_name: String,
     pub folder: Option<String>,
@@ -1497,12 +1585,16 @@ pub struct ContextMenuContext {
     pub line: usize,
     pub column: usize,
     pub client_id: ClientId,
+    #[serde(default)]
+    pub paste_shortcut: Option<String>,
 }
 
 impl ContextMenuContext {
     pub fn target_pane_id(&self) -> Option<PaneId> {
         match self.kind {
-            ContextMenuKind::Pane | ContextMenuKind::PaneFrame => self.pane_id,
+            ContextMenuKind::Pane | ContextMenuKind::PaneFrame | ContextMenuKind::Bar => {
+                self.pane_id
+            },
             _ => None,
         }
     }
@@ -1522,10 +1614,12 @@ pub enum ClickedPaneAction {
     ToggleMute,
     ToggleIgnoreOutput,
     ToggleWatch,
+    HideBar,
+    PasteFromClipboard,
 }
 
 impl ClickedPaneAction {
-    pub const ALL: [ClickedPaneAction; 9] = [
+    pub const ALL: [ClickedPaneAction; 11] = [
         ClickedPaneAction::CloseFocus,
         ClickedPaneAction::ToggleFocusFullscreen,
         ClickedPaneAction::ToggleEmbedOrFloating,
@@ -1535,6 +1629,8 @@ impl ClickedPaneAction {
         ClickedPaneAction::ToggleMute,
         ClickedPaneAction::ToggleIgnoreOutput,
         ClickedPaneAction::ToggleWatch,
+        ClickedPaneAction::HideBar,
+        ClickedPaneAction::PasteFromClipboard,
     ];
     pub fn kdl_name(&self) -> &'static str {
         match self {
@@ -1547,6 +1643,8 @@ impl ClickedPaneAction {
             ClickedPaneAction::ToggleMute => "MutePaneByPaneId",
             ClickedPaneAction::ToggleIgnoreOutput => "IgnorePaneOutputByPaneId",
             ClickedPaneAction::ToggleWatch => "WatchPaneByPaneId",
+            ClickedPaneAction::HideBar => "HideBarByPaneId",
+            ClickedPaneAction::PasteFromClipboard => "PasteFromClipboardByPaneId",
         }
     }
     pub fn from_kdl_name(name: &str) -> Option<Self> {
@@ -1569,6 +1667,8 @@ impl ClickedPaneAction {
             ClickedPaneAction::ToggleMute => Action::MutePaneByPaneId { pane_id },
             ClickedPaneAction::ToggleIgnoreOutput => Action::IgnorePaneOutputByPaneId { pane_id },
             ClickedPaneAction::ToggleWatch => Action::WatchPaneByPaneId { pane_id },
+            ClickedPaneAction::HideBar => Action::HideBarByPaneId { pane_id },
+            ClickedPaneAction::PasteFromClipboard => Action::PasteFromClipboardByPaneId { pane_id },
         }
     }
 }
@@ -2696,6 +2796,104 @@ pub struct ModeInfo {
     pub nested_descend_keys: Vec<KeyWithModifier>,
     #[serde(default)]
     pub remote_client: Option<String>,
+    #[serde(default)]
+    pub hidden_bars: HiddenBars,
+}
+
+pub const ALL_BARS: &str = "all";
+pub const TAB_BAR: &str = "tab-bar";
+pub const STATUS_BAR: &str = "status-bar";
+pub const COMPACT_BAR: &str = "compact-bar";
+
+pub fn bar_role_label(bar_name: &str) -> Option<&'static str> {
+    match bar_name {
+        TAB_BAR => Some("tab bar"),
+        STATUS_BAR => Some("status bar"),
+        COMPACT_BAR => Some("compact bar"),
+        _ => None,
+    }
+}
+
+pub fn bar_shows_mode(bar_name: &str) -> bool {
+    matches!(bar_name, STATUS_BAR | COMPACT_BAR)
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HiddenBars {
+    #[default]
+    None,
+    All,
+    Named(BTreeSet<String>),
+}
+
+impl HiddenBars {
+    pub fn from_names<S: AsRef<str>>(names: &[S]) -> Self {
+        if names.iter().any(|name| name.as_ref() == ALL_BARS) {
+            return HiddenBars::All;
+        }
+        let names: BTreeSet<String> = names
+            .iter()
+            .map(|name| name.as_ref().trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if names.is_empty() {
+            HiddenBars::None
+        } else {
+            HiddenBars::Named(names)
+        }
+    }
+    pub fn all_unless_named<S: AsRef<str>>(names: &[S]) -> Self {
+        if names.is_empty() {
+            HiddenBars::All
+        } else {
+            HiddenBars::from_names(names)
+        }
+    }
+    pub fn names(&self) -> Vec<String> {
+        match self {
+            HiddenBars::None => vec![],
+            HiddenBars::All => vec![ALL_BARS.to_owned()],
+            HiddenBars::Named(names) => names.iter().cloned().collect(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        matches!(self, HiddenBars::None)
+    }
+    pub fn hides_any<S: AsRef<str>>(&self, bar_names: &[S]) -> bool {
+        match self {
+            HiddenBars::None => false,
+            HiddenBars::All => true,
+            HiddenBars::Named(names) => bar_names
+                .iter()
+                .any(|bar_name| names.contains(bar_name.as_ref())),
+        }
+    }
+    pub fn hides(&self, bar_name: &str) -> bool {
+        self.hides_any(&[bar_name])
+    }
+    pub fn union(&self, other: &HiddenBars) -> HiddenBars {
+        match (self, other) {
+            (HiddenBars::All, _) | (_, HiddenBars::All) => HiddenBars::All,
+            (HiddenBars::None, other) | (other, HiddenBars::None) => other.clone(),
+            (HiddenBars::Named(a), HiddenBars::Named(b)) => {
+                HiddenBars::Named(a.union(b).cloned().collect())
+            },
+        }
+    }
+}
+
+impl FromStr for HiddenBars {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let names: Vec<&str> = s
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if names.len() == 1 && names[0] == "none" {
+            return Ok(HiddenBars::None);
+        }
+        Ok(HiddenBars::from_names(&names))
+    }
 }
 
 impl ModeInfo {
@@ -4115,7 +4313,7 @@ impl MessageToPlugin {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SessionWindowRequest {
+pub struct SessionTerminalRequest {
     pub session_name: Option<String>,
     pub new_window: bool,
     pub pane_id: Option<PaneId>,
@@ -4123,9 +4321,9 @@ pub struct SessionWindowRequest {
     pub cwd: Option<PathBuf>,
 }
 
-impl SessionWindowRequest {
+impl SessionTerminalRequest {
     pub fn existing(session_name: &str, pane_id: Option<PaneId>, new_window: bool) -> Self {
-        SessionWindowRequest {
+        SessionTerminalRequest {
             session_name: Some(session_name.to_owned()),
             new_window,
             pane_id,
@@ -4137,7 +4335,7 @@ impl SessionWindowRequest {
         layout: Option<LayoutInfo>,
         cwd: Option<PathBuf>,
     ) -> Self {
-        SessionWindowRequest {
+        SessionTerminalRequest {
             session_name: session_name.map(|n| n.to_owned()),
             new_window: true,
             layout,
@@ -4267,10 +4465,43 @@ impl fmt::Display for PopupCorner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
+pub enum OutsideClick {
+    #[default]
+    Block,
+    Close,
+}
+
+impl FromStr for OutsideClick {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "block" => Ok(OutsideClick::Block),
+            "close" => Ok(OutsideClick::Close),
+            other => Err(format!(
+                "invalid outside click behavior '{}', expected one of: block, close",
+                other
+            )),
+        }
+    }
+}
+
+impl fmt::Display for OutsideClick {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            OutsideClick::Block => write!(f, "block"),
+            OutsideClick::Close => write!(f, "close"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[non_exhaustive]
 pub struct PopupOptions {
     pub focused: bool,
     pub corner: Option<PopupCorner>,
+    pub capture_all_keys: bool,
+    pub outside_click: Option<OutsideClick>,
 }
 
 impl Default for PopupOptions {
@@ -4278,7 +4509,28 @@ impl Default for PopupOptions {
         PopupOptions {
             focused: true,
             corner: None,
+            capture_all_keys: false,
+            outside_click: None,
         }
+    }
+}
+
+impl PopupOptions {
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
+    }
+    pub fn corner(mut self, corner: PopupCorner) -> Self {
+        self.corner = Some(corner);
+        self
+    }
+    pub fn capture_all_keys(mut self, capture_all_keys: bool) -> Self {
+        self.capture_all_keys = capture_all_keys;
+        self
+    }
+    pub fn outside_click(mut self, outside_click: OutsideClick) -> Self {
+        self.outside_click = Some(outside_click);
+        self
     }
 }
 
@@ -5148,7 +5400,7 @@ pub enum PluginCommand {
     MarkAllSeen {
         session_name: Option<String>,
     },
-    OpenSessionWindow(SessionWindowRequest),
+    OpenSessionTerminal(SessionTerminalRequest),
     WriteToSessionPane {
         session_name: String,
         pane_id: PaneId,
@@ -5177,6 +5429,11 @@ pub enum PluginCommand {
     },
     SetLiveView(Option<LiveView>),
     SetLiveViewInput(bool),
+    ToggleBars(Vec<String>),
+    HideBars(Vec<String>),
+    ShowBars,
+    RegisterSettingsEntry(String),
+    UnregisterSettingsEntry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -5184,11 +5441,14 @@ pub enum SettingSection {
     TopLevel,
     PaneFrames,
     WebClient,
-    Window,
-    WindowTheme,
+    Terminal,
+    TerminalTheme,
     Keybinds,
     Blocks,
     Attention,
+    AttentionPopups,
+    AttentionBadge,
+    AttentionBadgeColors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -5321,6 +5581,9 @@ setting_keys! {
     SessionIndicator => (TopLevel, "session_indicator", false, Flag),
     SwapLayoutNotification => (TopLevel, "swap_layout_notification", false, Flag),
     OnQuit => (TopLevel, "on_quit", false, Text),
+    BarsHiddenOnStart => (TopLevel, "bars_hidden_on_start", false, Text),
+    HiddenBarsNotification => (TopLevel, "hidden_bars_notification", false, Flag),
+    ModeHintsWhenBarsHidden => (TopLevel, "mode_hints_when_bars_hidden", false, Flag),
     FrameRoundedCorners => (PaneFrames, "rounded_corners", false, Flag),
     FrameHideSessionName => (PaneFrames, "hide_session_name", false, Flag),
     FrameBorderStyle => (PaneFrames, "border_style", false, Text),
@@ -5342,77 +5605,78 @@ setting_keys! {
     WebClientCursorInactiveStyle => (WebClient, "cursor_inactive_style", true, Text),
     WebClientMacOptionIsMeta => (WebClient, "mac_option_is_meta", true, Flag),
     WebClientBaseUrl => (WebClient, "base_url", true, Text),
-    WindowFont => (Window, "font", false, Text),
-    WindowFontSize => (Window, "font_size", false, Decimal),
-    WindowFontWeight => (Window, "font_weight", false, Number),
-    WindowSystemFonts => (Window, "system_fonts", false, Flag),
-    WindowLigatures => (Window, "ligatures", false, Flag),
-    WindowFontFeatures => (Window, "font_features", false, List),
-    WindowCursorStyle => (Window, "cursor_style", false, Text),
-    WindowCursorBlink => (Window, "cursor_blink", false, Flag),
-    WindowCursorUnfocusedHollow => (Window, "cursor_unfocused_hollow", false, Flag),
-    WindowStartupMode => (Window, "startup_mode", true, Text),
-    WindowTerminalRequests => (Window, "terminal_requests", false, Text),
-    WindowInitialColumns => (Window, "initial_columns", true, Number),
-    WindowInitialRows => (Window, "initial_rows", true, Number),
-    WindowOpacity => (Window, "opacity", false, Decimal),
-    WindowOpacityMode => (Window, "opacity_mode", false, Text),
-    WindowBlur => (Window, "blur", false, Flag),
-    WindowPadding => (Window, "padding", false, Decimal),
-    WindowPaddingTop => (Window, "padding_top", false, Decimal),
-    WindowPaddingRight => (Window, "padding_right", false, Decimal),
-    WindowPaddingBottom => (Window, "padding_bottom", false, Decimal),
-    WindowPaddingLeft => (Window, "padding_left", false, Decimal),
-    WindowPaddingBalance => (Window, "padding_balance", false, Flag),
-    WindowPaddingColor => (Window, "padding_color", false, Text),
-    WindowLineHeight => (Window, "line_height", false, Decimal),
-    WindowCellWidth => (Window, "cell_width", false, Decimal),
-    WindowBaselineOffset => (Window, "baseline_offset", false, Number),
-    WindowUnderlineOffset => (Window, "underline_offset", false, Number),
-    WindowUnderlineThickness => (Window, "underline_thickness", false, Number),
-    WindowMinimumContrast => (Window, "minimum_contrast", false, Decimal),
-    WindowSmoothScrolling => (Window, "smooth_scrolling", false, Flag),
-    WindowScrollAnimationDuration => (Window, "scroll_animation_duration", false, Number),
-    WindowScrollMomentum => (Window, "scroll_momentum", false, Flag),
-    WindowScrollMomentumFriction => (Window, "scroll_momentum_friction", false, Decimal),
-    WindowBell => (Window, "bell", false, Text),
-    WindowOpenLinks => (Window, "open_links", false, Flag),
-    WindowOpenLinksWithShift => (Window, "open_links_with_shift", false, Flag),
-    WindowShiftDragSelects => (Window, "shift_drag_selects", false, Flag),
-    WindowReuseSessionWindows => (Window, "reuse_session_windows", false, Flag),
-    WindowMiddleClickPaste => (Window, "middle_click_paste", false, Flag),
-    WindowHidePointerWhileTyping => (Window, "hide_pointer_while_typing", false, Flag),
-    WindowMacosOptionAsAlt => (Window, "macos_option_as_alt", false, Text),
-    WindowPasteKeys => (Window, "paste_keys", false, List),
-    WindowCopyKeys => (Window, "copy_keys", false, List),
-    WindowZoomInKeys => (Window, "zoom_in_keys", false, List),
-    WindowZoomOutKeys => (Window, "zoom_out_keys", false, List),
-    WindowZoomResetKeys => (Window, "zoom_reset_keys", false, List),
-    WindowFullscreenKeys => (Window, "fullscreen_keys", false, List),
-    WindowColorForeground => (WindowTheme, "foreground", false, Colour),
-    WindowColorBackground => (WindowTheme, "background", false, Colour),
-    WindowColorCursor => (WindowTheme, "cursor", false, Colour),
-    WindowColorBlack => (WindowTheme, "black", false, Colour),
-    WindowColorRed => (WindowTheme, "red", false, Colour),
-    WindowColorGreen => (WindowTheme, "green", false, Colour),
-    WindowColorYellow => (WindowTheme, "yellow", false, Colour),
-    WindowColorBlue => (WindowTheme, "blue", false, Colour),
-    WindowColorMagenta => (WindowTheme, "magenta", false, Colour),
-    WindowColorCyan => (WindowTheme, "cyan", false, Colour),
-    WindowColorWhite => (WindowTheme, "white", false, Colour),
-    WindowColorBrightBlack => (WindowTheme, "bright_black", false, Colour),
-    WindowColorBrightRed => (WindowTheme, "bright_red", false, Colour),
-    WindowColorBrightGreen => (WindowTheme, "bright_green", false, Colour),
-    WindowColorBrightYellow => (WindowTheme, "bright_yellow", false, Colour),
-    WindowColorBrightBlue => (WindowTheme, "bright_blue", false, Colour),
-    WindowColorBrightMagenta => (WindowTheme, "bright_magenta", false, Colour),
-    WindowColorBrightCyan => (WindowTheme, "bright_cyan", false, Colour),
-    WindowColorBrightWhite => (WindowTheme, "bright_white", false, Colour),
+    TerminalFont => (Terminal, "font", false, Text),
+    TerminalFontSize => (Terminal, "font_size", false, Decimal),
+    TerminalFontWeight => (Terminal, "font_weight", false, Number),
+    TerminalSystemFonts => (Terminal, "system_fonts", false, Flag),
+    TerminalLigatures => (Terminal, "ligatures", false, Flag),
+    TerminalFontFeatures => (Terminal, "font_features", false, List),
+    TerminalCursorStyle => (Terminal, "cursor_style", false, Text),
+    TerminalCursorBlink => (Terminal, "cursor_blink", false, Flag),
+    TerminalCursorUnfocusedHollow => (Terminal, "cursor_unfocused_hollow", false, Flag),
+    TerminalStartupMode => (Terminal, "startup_mode", true, Text),
+    TerminalTerminalRequests => (Terminal, "terminal_requests", false, Text),
+    TerminalInitialColumns => (Terminal, "initial_columns", true, Number),
+    TerminalInitialRows => (Terminal, "initial_rows", true, Number),
+    TerminalOpacity => (Terminal, "opacity", false, Decimal),
+    TerminalOpacityMode => (Terminal, "opacity_mode", false, Text),
+    TerminalBlur => (Terminal, "blur", false, Flag),
+    TerminalPadding => (Terminal, "padding", false, Decimal),
+    TerminalPaddingTop => (Terminal, "padding_top", false, Decimal),
+    TerminalPaddingRight => (Terminal, "padding_right", false, Decimal),
+    TerminalPaddingBottom => (Terminal, "padding_bottom", false, Decimal),
+    TerminalPaddingLeft => (Terminal, "padding_left", false, Decimal),
+    TerminalPaddingBalance => (Terminal, "padding_balance", false, Flag),
+    TerminalPaddingColor => (Terminal, "padding_color", false, Text),
+    TerminalLineHeight => (Terminal, "line_height", false, Decimal),
+    TerminalCellWidth => (Terminal, "cell_width", false, Decimal),
+    TerminalBaselineOffset => (Terminal, "baseline_offset", false, Number),
+    TerminalUnderlineOffset => (Terminal, "underline_offset", false, Number),
+    TerminalUnderlineThickness => (Terminal, "underline_thickness", false, Number),
+    TerminalMinimumContrast => (Terminal, "minimum_contrast", false, Decimal),
+    TerminalSmoothScrolling => (Terminal, "smooth_scrolling", false, Flag),
+    TerminalScrollAnimationDuration => (Terminal, "scroll_animation_duration", false, Number),
+    TerminalScrollMomentum => (Terminal, "scroll_momentum", false, Flag),
+    TerminalScrollMomentumFriction => (Terminal, "scroll_momentum_friction", false, Decimal),
+    TerminalBell => (Terminal, "bell", false, Text),
+    TerminalOpenLinks => (Terminal, "open_links", false, Flag),
+    TerminalOpenLinksWithShift => (Terminal, "open_links_with_shift", false, Flag),
+    TerminalShiftDragSelects => (Terminal, "shift_drag_selects", false, Flag),
+    TerminalReuseSessionWindows => (Terminal, "reuse_session_windows", false, Flag),
+    TerminalMiddleClickPaste => (Terminal, "middle_click_paste", false, Flag),
+    TerminalAllowRemoteClipboardRead => (Terminal, "allow_remote_clipboard_read", false, Flag),
+    TerminalHidePointerWhileTyping => (Terminal, "hide_pointer_while_typing", false, Flag),
+    TerminalMacosOptionAsAlt => (Terminal, "macos_option_as_alt", false, Text),
+    TerminalPasteKeys => (Terminal, "paste_keys", false, List),
+    TerminalCopyKeys => (Terminal, "copy_keys", false, List),
+    TerminalZoomInKeys => (Terminal, "zoom_in_keys", false, List),
+    TerminalZoomOutKeys => (Terminal, "zoom_out_keys", false, List),
+    TerminalZoomResetKeys => (Terminal, "zoom_reset_keys", false, List),
+    TerminalFullscreenKeys => (Terminal, "fullscreen_keys", false, List),
+    TerminalColorForeground => (TerminalTheme, "foreground", false, Colour),
+    TerminalColorBackground => (TerminalTheme, "background", false, Colour),
+    TerminalColorCursor => (TerminalTheme, "cursor", false, Colour),
+    TerminalColorBlack => (TerminalTheme, "black", false, Colour),
+    TerminalColorRed => (TerminalTheme, "red", false, Colour),
+    TerminalColorGreen => (TerminalTheme, "green", false, Colour),
+    TerminalColorYellow => (TerminalTheme, "yellow", false, Colour),
+    TerminalColorBlue => (TerminalTheme, "blue", false, Colour),
+    TerminalColorMagenta => (TerminalTheme, "magenta", false, Colour),
+    TerminalColorCyan => (TerminalTheme, "cyan", false, Colour),
+    TerminalColorWhite => (TerminalTheme, "white", false, Colour),
+    TerminalColorBrightBlack => (TerminalTheme, "bright_black", false, Colour),
+    TerminalColorBrightRed => (TerminalTheme, "bright_red", false, Colour),
+    TerminalColorBrightGreen => (TerminalTheme, "bright_green", false, Colour),
+    TerminalColorBrightYellow => (TerminalTheme, "bright_yellow", false, Colour),
+    TerminalColorBrightBlue => (TerminalTheme, "bright_blue", false, Colour),
+    TerminalColorBrightMagenta => (TerminalTheme, "bright_magenta", false, Colour),
+    TerminalColorBrightCyan => (TerminalTheme, "bright_cyan", false, Colour),
+    TerminalColorBrightWhite => (TerminalTheme, "bright_white", false, Colour),
     Keybinds => (Keybinds, "keybinds", false, Text),
     Mousebinds => (Keybinds, "mousebinds", false, Text),
     PluginAliases => (Blocks, "plugins", false, Text),
     LoadPlugins => (Blocks, "load_plugins", true, Text),
-    Env => (Blocks, "env", true, Text),
+    Env => (Blocks, "env", false, Text),
     Themes => (Blocks, "themes", false, Text),
     ContextMenu => (Blocks, "context_menu", false, Text),
     AttentionFrameMarkers => (Attention, "frame_markers", false, Flag),
@@ -5424,8 +5688,22 @@ setting_keys! {
     AttentionIdleSilenceSecs => (Attention, "idle_silence_secs", false, Number),
     AttentionStartupCard => (Attention, "startup_card", false, Text),
     AttentionTrayIcon => (Attention, "tray_icon", false, Flag),
-    AttentionDesktopNotifications => (Attention, "desktop_notifications", false, Text),
     AttentionNotificationDetails => (Attention, "notification_details", false, Flag),
+    AttentionPopupNeedsYou => (AttentionPopups, "needs_you", false, Flag),
+    AttentionPopupFailed => (AttentionPopups, "failed", false, Flag),
+    AttentionPopupDone => (AttentionPopups, "done", false, Flag),
+    AttentionBadgeNeedsYou => (AttentionBadge, "needs_you", false, Flag),
+    AttentionBadgeFailed => (AttentionBadge, "failed", false, Flag),
+    AttentionBadgeDone => (AttentionBadge, "done", false, Flag),
+    AttentionBadgeWorking => (AttentionBadge, "working", false, Flag),
+    AttentionBadgeQuiet => (AttentionBadge, "quiet", false, Flag),
+    AttentionBadgeNewOutput => (AttentionBadge, "new_output", false, Flag),
+    AttentionBadgeColorNeedsYou => (AttentionBadgeColors, "needs_you", false, Colour),
+    AttentionBadgeColorFailed => (AttentionBadgeColors, "failed", false, Colour),
+    AttentionBadgeColorDone => (AttentionBadgeColors, "done", false, Colour),
+    AttentionBadgeColorWorking => (AttentionBadgeColors, "working", false, Colour),
+    AttentionBadgeColorQuiet => (AttentionBadgeColors, "quiet", false, Colour),
+    AttentionBadgeColorNewOutput => (AttentionBadgeColors, "new_output", false, Colour),
 }
 
 impl SettingKey {
@@ -5440,9 +5718,16 @@ impl SettingKey {
             },
             SettingSection::PaneFrames => format!("ui.pane_frames.{}", self.kdl_name()),
             SettingSection::WebClient => format!("web_client.{}", self.kdl_name()),
-            SettingSection::Window => format!("window.{}", self.kdl_name()),
-            SettingSection::WindowTheme => format!("window.theme.{}", self.kdl_name()),
+            SettingSection::Terminal => format!("terminal.{}", self.kdl_name()),
+            SettingSection::TerminalTheme => format!("terminal.theme.{}", self.kdl_name()),
             SettingSection::Attention => format!("attention.{}", self.kdl_name()),
+            SettingSection::AttentionPopups => {
+                format!("attention.desktop_notifications.{}", self.kdl_name())
+            },
+            SettingSection::AttentionBadge => format!("attention.tray_badge.{}", self.kdl_name()),
+            SettingSection::AttentionBadgeColors => {
+                format!("attention.tray_badge_colors.{}", self.kdl_name())
+            },
         }
     }
     pub fn from_id(id: &str) -> Option<SettingKey> {
@@ -5453,15 +5738,18 @@ impl SettingKey {
             SettingSection::TopLevel | SettingSection::Keybinds | SettingSection::Blocks => &[],
             SettingSection::PaneFrames => &["ui", "pane_frames"],
             SettingSection::WebClient => &["web_client"],
-            SettingSection::Window => &["window"],
-            SettingSection::WindowTheme => &["window", "theme"],
+            SettingSection::Terminal => &["terminal"],
+            SettingSection::TerminalTheme => &["terminal", "theme"],
             SettingSection::Attention => &["attention"],
+            SettingSection::AttentionPopups => &["attention", "desktop_notifications"],
+            SettingSection::AttentionBadge => &["attention", "tray_badge"],
+            SettingSection::AttentionBadgeColors => &["attention", "tray_badge_colors"],
         }
     }
-    pub fn is_window(&self) -> bool {
+    pub fn is_terminal(&self) -> bool {
         matches!(
             self.section(),
-            SettingSection::Window | SettingSection::WindowTheme
+            SettingSection::Terminal | SettingSection::TerminalTheme
         )
     }
     pub fn is_block(&self) -> bool {
@@ -6013,8 +6301,36 @@ mod popup_placement_tests {
             PopupOptions {
                 focused: true,
                 corner: None,
+                capture_all_keys: false,
+                outside_click: None,
             }
         );
+    }
+
+    #[test]
+    fn popup_options_builders_set_each_option() {
+        assert_eq!(
+            PopupOptions::default()
+                .focused(false)
+                .corner(PopupCorner::BottomLeft)
+                .capture_all_keys(true)
+                .outside_click(OutsideClick::Close),
+            PopupOptions {
+                focused: false,
+                corner: Some(PopupCorner::BottomLeft),
+                capture_all_keys: true,
+                outside_click: Some(OutsideClick::Close),
+            }
+        );
+    }
+
+    #[test]
+    fn outside_click_parses_its_own_display_form() {
+        for outside_click in [OutsideClick::Block, OutsideClick::Close] {
+            assert_eq!(outside_click.to_string().parse(), Ok(outside_click));
+        }
+        assert_eq!(" Close ".parse::<OutsideClick>(), Ok(OutsideClick::Close));
+        assert!("unfocus".parse::<OutsideClick>().is_err());
     }
 }
 
@@ -6032,6 +6348,114 @@ mod extract_text_cluster_tests {
         );
         assert_eq!(extract_text_to_column(line, 2), "ae\u{0301}");
         assert_eq!(extract_text_by_columns(line, 3, 5), "\u{1F468}\u{200D}");
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod kitty_serialization_tests {
+    use super::*;
+
+    fn kitty(key: &str) -> Option<String> {
+        KeyWithModifier::from_str(key).unwrap().serialize_kitty()
+    }
+
+    #[test]
+    fn text_keys_stay_text() {
+        assert_eq!(kitty("a").as_deref(), Some("a"));
+        assert_eq!(kitty("A").as_deref(), Some("A"));
+        assert_eq!(kitty("Shift a").as_deref(), Some("A"));
+        assert_eq!(kitty("Space").as_deref(), Some(" "));
+        assert_eq!(
+            KeyWithModifier::new(BareKey::Char('é'))
+                .serialize_kitty()
+                .as_deref(),
+            Some("é")
+        );
+    }
+
+    #[test]
+    fn modified_characters_use_csi_u_with_the_unshifted_codepoint() {
+        assert_eq!(kitty("Ctrl a").as_deref(), Some("\u{1b}[97;5u"));
+        assert_eq!(kitty("Alt a").as_deref(), Some("\u{1b}[97;3u"));
+        assert_eq!(kitty("Super a").as_deref(), Some("\u{1b}[97;9u"));
+        assert_eq!(kitty("Ctrl Alt Shift a").as_deref(), Some("\u{1b}[97;8u"));
+        assert_eq!(kitty("Ctrl Shift v").as_deref(), Some("\u{1b}[118;6u"));
+        assert_eq!(kitty("Ctrl V").as_deref(), Some("\u{1b}[118;6u"));
+        assert_eq!(kitty("Ctrl v").as_deref(), Some("\u{1b}[118;5u"));
+        assert_eq!(kitty("Ctrl Space").as_deref(), Some("\u{1b}[32;5u"));
+        assert_eq!(kitty("Alt !").as_deref(), Some("\u{1b}[33;3u"));
+    }
+
+    #[test]
+    fn enter_tab_and_backspace_are_legacy_only_when_unmodified() {
+        assert_eq!(kitty("Enter").as_deref(), Some("\r"));
+        assert_eq!(kitty("Tab").as_deref(), Some("\t"));
+        assert_eq!(kitty("Backspace").as_deref(), Some("\u{7f}"));
+        assert_eq!(kitty("Shift Enter").as_deref(), Some("\u{1b}[13;2u"));
+        assert_eq!(kitty("Shift Tab").as_deref(), Some("\u{1b}[9;2u"));
+        assert_eq!(kitty("Ctrl Backspace").as_deref(), Some("\u{1b}[127;5u"));
+    }
+
+    #[test]
+    fn escape_is_always_disambiguated() {
+        assert_eq!(kitty("Esc").as_deref(), Some("\u{1b}[27u"));
+        assert_eq!(kitty("Alt Esc").as_deref(), Some("\u{1b}[27;3u"));
+    }
+
+    #[test]
+    fn functional_keys_use_the_kitty_forms() {
+        assert_eq!(kitty("Up").as_deref(), Some("\u{1b}[A"));
+        assert_eq!(kitty("Ctrl Left").as_deref(), Some("\u{1b}[1;5D"));
+        assert_eq!(kitty("Home").as_deref(), Some("\u{1b}[H"));
+        assert_eq!(kitty("Shift End").as_deref(), Some("\u{1b}[1;2F"));
+        assert_eq!(kitty("F1").as_deref(), Some("\u{1b}OP"));
+        assert_eq!(kitty("Alt F2").as_deref(), Some("\u{1b}[1;3Q"));
+        assert_eq!(kitty("F3").as_deref(), Some("\u{1b}[13~"));
+        assert_eq!(kitty("Ctrl F3").as_deref(), Some("\u{1b}[13;5~"));
+        assert_eq!(kitty("F5").as_deref(), Some("\u{1b}[15~"));
+        assert_eq!(kitty("Shift F12").as_deref(), Some("\u{1b}[24;2~"));
+        assert_eq!(kitty("Insert").as_deref(), Some("\u{1b}[2~"));
+        assert_eq!(kitty("Shift Insert").as_deref(), Some("\u{1b}[2;2~"));
+        assert_eq!(kitty("Delete").as_deref(), Some("\u{1b}[3~"));
+        assert_eq!(kitty("PageUp").as_deref(), Some("\u{1b}[5~"));
+        assert_eq!(kitty("Ctrl PageDown").as_deref(), Some("\u{1b}[6;5~"));
+    }
+
+    #[test]
+    fn lock_keys_are_not_reported() {
+        assert_eq!(
+            KeyWithModifier::new(BareKey::CapsLock).serialize_kitty(),
+            None
+        );
+        assert_eq!(
+            KeyWithModifier::new(BareKey::NumLock).serialize_kitty(),
+            None
+        );
+    }
+
+    #[test]
+    fn csi_u_encodings_decode_back_to_the_same_key() {
+        for key in [
+            "Ctrl a",
+            "Ctrl Shift v",
+            "Alt Esc",
+            "Shift Enter",
+            "Super Tab",
+        ] {
+            let encoded = kitty(key).unwrap();
+            let body = encoded
+                .strip_prefix("\u{1b}[")
+                .and_then(|rest| rest.strip_suffix('u'))
+                .unwrap();
+            let (number, modifiers) = body.split_once(';').unwrap();
+            let parsed =
+                KeyWithModifier::from_bytes_with_u(number.as_bytes(), modifiers.as_bytes());
+            assert_eq!(
+                parsed,
+                Some(KeyWithModifier::from_str(key).unwrap()),
+                "{key}"
+            );
+        }
     }
 }
 
@@ -6095,5 +6519,86 @@ mod live_view_release_gesture_tests {
             "<Ctrl Alt HOME>"
         );
         assert_eq!(LiveViewReleaseGesture::display(" odd text "), "<odd text>");
+    }
+}
+
+#[cfg(test)]
+mod hidden_bars_tests {
+    use super::*;
+
+    #[test]
+    fn no_names_means_nothing_is_hidden_and_all_means_everything() {
+        assert_eq!(HiddenBars::from_names::<&str>(&[]), HiddenBars::None);
+        assert_eq!(HiddenBars::from_names(&["all"]), HiddenBars::All);
+        assert_eq!(HiddenBars::all_unless_named::<&str>(&[]), HiddenBars::All);
+    }
+
+    #[test]
+    fn named_bars_hide_only_themselves() {
+        let hidden_bars = HiddenBars::from_names(&[TAB_BAR]);
+        assert!(hidden_bars.hides(TAB_BAR));
+        assert!(!hidden_bars.hides(STATUS_BAR));
+        assert!(hidden_bars.hides_any(&["zellij:bars", TAB_BAR]));
+        assert!(HiddenBars::All.hides(STATUS_BAR));
+        assert!(!HiddenBars::None.hides(STATUS_BAR));
+    }
+
+    #[test]
+    fn hiding_more_bars_adds_to_what_is_hidden() {
+        let hidden_bars =
+            HiddenBars::from_names(&[TAB_BAR]).union(&HiddenBars::from_names(&[STATUS_BAR]));
+        assert_eq!(hidden_bars, HiddenBars::from_names(&[TAB_BAR, STATUS_BAR]));
+        assert_eq!(hidden_bars.union(&HiddenBars::All), HiddenBars::All);
+        assert_eq!(HiddenBars::None.union(&hidden_bars), hidden_bars);
+    }
+
+    #[test]
+    fn hidden_bars_parse_from_a_comma_separated_list() {
+        assert_eq!(
+            "tab-bar,status-bar".parse::<HiddenBars>().unwrap(),
+            HiddenBars::from_names(&[TAB_BAR, STATUS_BAR])
+        );
+        assert_eq!("none".parse::<HiddenBars>().unwrap(), HiddenBars::None);
+        assert_eq!("all".parse::<HiddenBars>().unwrap(), HiddenBars::All);
+        assert_eq!(
+            HiddenBars::from_names(&[TAB_BAR, STATUS_BAR])
+                .names()
+                .join(",")
+                .parse::<HiddenBars>()
+                .unwrap(),
+            HiddenBars::from_names(&[TAB_BAR, STATUS_BAR])
+        );
+    }
+
+    #[test]
+    fn a_built_in_bar_is_named_by_its_role_and_a_plugin_by_its_location() {
+        use crate::input::layout::{Run, RunPluginOrAlias};
+        let bar = |url: &str, role: Option<&str>| {
+            let configuration =
+                role.map(|role| BTreeMap::from([("role".to_owned(), role.to_owned())]));
+            Run::Plugin(RunPluginOrAlias::from_url(url, &configuration, None, None).unwrap())
+        };
+        assert!(bar("zellij:bars", Some(STATUS_BAR))
+            .bar_names()
+            .contains(&STATUS_BAR.to_owned()));
+        assert!(bar("zellij:bars", None)
+            .bar_names()
+            .contains(&TAB_BAR.to_owned()));
+        assert!(bar("zellij:status-bar", None)
+            .bar_names()
+            .contains(&STATUS_BAR.to_owned()));
+        assert_eq!(
+            bar("file:/tmp/my-bar.wasm", None).bar_names(),
+            vec!["file:/tmp/my-bar.wasm".to_owned()]
+        );
+    }
+
+    #[test]
+    fn only_the_status_and_compact_bars_show_the_mode() {
+        assert!(bar_shows_mode(STATUS_BAR));
+        assert!(bar_shows_mode(COMPACT_BAR));
+        assert!(!bar_shows_mode(TAB_BAR));
+        assert_eq!(bar_role_label(STATUS_BAR), Some("status bar"));
+        assert_eq!(bar_role_label("my-bar"), None);
     }
 }

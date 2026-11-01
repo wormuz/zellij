@@ -10,7 +10,7 @@ pub struct EventNameList {
 pub struct Event {
     #[prost(enumeration="EventType", tag="1")]
     pub name: i32,
-    #[prost(oneof="event::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 63")]
+    #[prost(oneof="event::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 63, 64")]
     pub payload: ::core::option::Option<event::Payload>,
 }
 /// Nested message and enum types in `Event`.
@@ -138,7 +138,23 @@ pub mod event {
         DesktopIntegrationPayload(::prost::alloc::string::String),
         #[prost(message, tag="63")]
         LiveViewStateChangedPayload(super::LiveViewStateChangedPayload),
+        #[prost(message, tag="64")]
+        PluginSettingsEntriesPayload(super::PluginSettingsEntriesPayload),
     }
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PluginSettingsEntry {
+    #[prost(uint32, tag="1")]
+    pub plugin_id: u32,
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PluginSettingsEntriesPayload {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<PluginSettingsEntry>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -183,6 +199,16 @@ pub struct GlobalAttentionUpdatePayload {
     pub current_session: ::prost::alloc::string::String,
     #[prost(message, repeated, tag="2")]
     pub sessions: ::prost::alloc::vec::Vec<GlobalSessionAttention>,
+    #[prost(message, repeated, tag="3")]
+    pub badge_colors: ::prost::alloc::vec::Vec<StatusColor>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StatusColor {
+    #[prost(string, tag="1")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub rgb: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -557,6 +583,8 @@ pub struct ContextMenuPayload {
     pub client_id: u32,
     #[prost(message, repeated, tag="10")]
     pub entries: ::prost::alloc::vec::Vec<ContextMenuEntry>,
+    #[prost(string, optional, tag="11")]
+    pub paste_shortcut: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1219,6 +1247,8 @@ pub struct ModeUpdatePayload {
     pub nested_descend_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, optional, tag="23")]
     pub remote_client: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="24")]
+    pub hidden_bars: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1638,6 +1668,7 @@ pub enum EventType {
     SessionHistoryUpdate = 68,
     DesktopIntegration = 69,
     LiveViewStateChanged = 71,
+    PluginSettingsEntries = 72,
 }
 impl EventType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1715,6 +1746,7 @@ impl EventType {
             EventType::SessionHistoryUpdate => "SessionHistoryUpdate",
             EventType::DesktopIntegration => "DesktopIntegration",
             EventType::LiveViewStateChanged => "LiveViewStateChanged",
+            EventType::PluginSettingsEntries => "PluginSettingsEntries",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1789,6 +1821,7 @@ impl EventType {
             "SessionHistoryUpdate" => Some(Self::SessionHistoryUpdate),
             "DesktopIntegration" => Some(Self::DesktopIntegration),
             "LiveViewStateChanged" => Some(Self::LiveViewStateChanged),
+            "PluginSettingsEntries" => Some(Self::PluginSettingsEntries),
             _ => None,
         }
     }
@@ -1892,6 +1925,8 @@ pub enum ClickedPaneAction {
     ToggleMute = 6,
     ToggleIgnoreOutput = 7,
     ToggleWatch = 8,
+    HideBar = 9,
+    PasteFromClipboard = 10,
 }
 impl ClickedPaneAction {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1909,6 +1944,8 @@ impl ClickedPaneAction {
             ClickedPaneAction::ToggleMute => "ClickedPaneActionToggleMute",
             ClickedPaneAction::ToggleIgnoreOutput => "ClickedPaneActionToggleIgnoreOutput",
             ClickedPaneAction::ToggleWatch => "ClickedPaneActionToggleWatch",
+            ClickedPaneAction::HideBar => "ClickedPaneActionHideBar",
+            ClickedPaneAction::PasteFromClipboard => "ClickedPaneActionPasteFromClipboard",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1923,6 +1960,8 @@ impl ClickedPaneAction {
             "ClickedPaneActionToggleMute" => Some(Self::ToggleMute),
             "ClickedPaneActionToggleIgnoreOutput" => Some(Self::ToggleIgnoreOutput),
             "ClickedPaneActionToggleWatch" => Some(Self::ToggleWatch),
+            "ClickedPaneActionHideBar" => Some(Self::HideBar),
+            "ClickedPaneActionPasteFromClipboard" => Some(Self::PasteFromClipboard),
             _ => None,
         }
     }

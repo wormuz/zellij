@@ -363,6 +363,29 @@ pub const ACTION_SPECS: &[ActionSpec] = &[
         "Set the pane frame style",
         &[positional("Style", ArgKind::Choice(FRAME_STYLES), true)],
     ),
+    with_args(
+        "ToggleBars",
+        "Show all bars if any are hidden, otherwise hide the named bars (all if none are named)",
+        &[ArgSpec {
+            name: "",
+            label: "Bars (eg. tab-bar status-bar)",
+            kind: ArgKind::Text,
+            place: ArgPlace::Rest,
+            required: false,
+        }],
+    ),
+    with_args(
+        "HideBars",
+        "Hide the named bars (all if none are named)",
+        &[ArgSpec {
+            name: "",
+            label: "Bars (eg. tab-bar status-bar)",
+            kind: ArgKind::Text,
+            place: ArgPlace::Rest,
+            required: false,
+        }],
+    ),
+    plain("ShowBars", "Show all hidden bars"),
     plain("ToggleMouseMode", "Turn mouse support on or off"),
     plain("SetDarkTheme", "Use the dark theme"),
     plain("SetLightTheme", "Use the light theme"),
@@ -407,7 +430,7 @@ pub const ACTION_SPECS: &[ActionSpec] = &[
         "Show or hide the desktop app's tray icon until it restarts",
     ),
     plain(
-        "OpenSessionInWindow",
+        "OpenSessionInTerminal",
         "Open this session in a desktop window (it opens on the computer running Zellij)",
     ),
     plain("MarkPaneSeen", "Clear past events of the focused pane"),
@@ -499,7 +522,7 @@ pub const ACTION_SPECS: &[ActionSpec] = &[
     ),
     menu_only(
         "TogglePaneEmbedOrFloatingByPaneId",
-        "Float or embed the clicked pane",
+        "Make the clicked pane floating or tiled",
         &[],
     ),
     menu_only("TogglePanePinnedByPaneId", "Pin the clicked pane", &[]),
@@ -513,6 +536,11 @@ pub const ACTION_SPECS: &[ActionSpec] = &[
     menu_only(
         "IgnorePaneOutputByPaneId",
         "Ignore new output of the clicked pane",
+        &[],
+    ),
+    menu_only(
+        "PasteFromClipboardByPaneId",
+        "Paste the clipboard into the clicked pane (desktop app only)",
         &[],
     ),
     menu_only(
@@ -577,6 +605,14 @@ pub const ACTION_SPECS: &[ActionSpec] = &[
             ArgKind::Choice(RESIZE_DIRECTIONS),
             true,
         )],
+    ),
+    mouse_only(
+        "DrawFloatingPane",
+        "Drag a rectangle to open a floating pane in it",
+        &[
+            positional("Plugin (empty for a terminal)", ArgKind::Text, false),
+            config_pairs(),
+        ],
     ),
     mouse_only("PassToApp", "Send the event to the app in the pane", &[]),
     mouse_only("Ignore", "Do nothing", &[]),

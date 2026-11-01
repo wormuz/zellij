@@ -129,7 +129,7 @@ impl TestRunner {
     }
 
     pub fn start_in_background(self) -> BackgroundTestSession {
-        let (session_context, fake_client_os_api, _fake_client_handle, client_info) = self.boot();
+        let (session_context, fake_client_os_api, fake_client_handle, client_info) = self.boot();
         let cli_args = session_context.cli_args.clone();
         let config = session_context.config.clone();
         let config_options = session_context.config_options.clone();
@@ -156,6 +156,10 @@ impl TestRunner {
             "the background session to start its first terminal",
             |fake_pty_registry| (!fake_pty_registry.fake_pty_states.is_empty()).then_some(()),
         );
+        drop(fake_client_handle);
+        crate::wait_for("the server to release the detaching client", || {
+            session_context.fake_server_os_api.connected_client_count() == 0
+        });
         BackgroundTestSession { session_context }
     }
 
@@ -577,8 +581,10 @@ impl TestClient {
         self.fake_client_handle.received_server_messages()
     }
 
-    pub fn received_window_settings(&self) -> Vec<zellij_utils::input::window::WindowSettings> {
-        self.fake_client_handle.received_window_settings()
+    pub fn received_terminal_settings(
+        &self,
+    ) -> Vec<zellij_utils::input::terminal::TerminalSettings> {
+        self.fake_client_handle.received_terminal_settings()
     }
 
     pub fn send_action(&self, action: zellij_utils::input::actions::Action) {
@@ -819,16 +825,16 @@ impl TestSession {
         self.main_client.received_server_messages()
     }
 
-    pub fn wait_for_window_settings(
+    pub fn wait_for_terminal_settings(
         &self,
         what: &str,
-        predicate: impl Fn(&zellij_utils::input::window::WindowSettings) -> bool,
-    ) -> zellij_utils::input::window::WindowSettings {
+        predicate: impl Fn(&zellij_utils::input::terminal::TerminalSettings) -> bool,
+    ) -> zellij_utils::input::terminal::TerminalSettings {
         let deadline = std::time::Instant::now() + crate::default_timeout();
         loop {
             if let Some(found) = self
                 .main_client
-                .received_window_settings()
+                .received_terminal_settings()
                 .into_iter()
                 .rev()
                 .find(|settings| predicate(settings))

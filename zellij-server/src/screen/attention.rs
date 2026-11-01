@@ -317,7 +317,12 @@ impl Screen {
             ));
     }
 
-    pub(crate) fn set_global_attention(&mut self, global: GlobalAttention) {
+    pub(crate) fn set_global_attention(&mut self, mut global: GlobalAttention) {
+        let colors = &self.attention.config().tray_badge_colors;
+        global.badge_colors = zellij_utils::input::attention::BADGE_STATUSES
+            .iter()
+            .filter_map(|status| colors.get(*status).map(|rgb| (*status, rgb)))
+            .collect();
         if self.global_attention.as_ref() == Some(&global) {
             return;
         }
@@ -808,6 +813,9 @@ impl Screen {
         }
         self.flush_attention(true);
         self.report_session_attention();
+        if let Some(global) = self.global_attention.clone() {
+            self.set_global_attention(global);
+        }
     }
 
     fn context_menu_toggle_is_on(
@@ -828,7 +836,24 @@ impl Screen {
             .get_active_tab(context.client_id)
             .ok()
             .map(|tab| tab.id);
+        let clicked_any_pane = context.target_pane_id().map(PaneId::from);
+        let clicked_pane_is_fullscreen = || {
+            let Some(pane_id) = clicked_any_pane else {
+                return false;
+            };
+            self.tabs
+                .values()
+                .find(|tab| tab.get_pane_with_id(pane_id).is_some())
+                .map(|tab| tab.fullscreen_pane_id() == Some(pane_id))
+                .unwrap_or(false)
+        };
         actions.iter().any(|action| match action {
+            ContextMenuAction::ClickedPane(ClickedPaneAction::ToggleFocusFullscreen) => {
+                clicked_pane_is_fullscreen()
+            },
+            ContextMenuAction::ClickedPane(ClickedPaneAction::ToggleEmbedOrFloating) => {
+                context.pane_is_floating
+            },
             ContextMenuAction::ClickedPane(ClickedPaneAction::ToggleMute) => clicked_pane
                 .map(|p| self.attention.pane_is_muted(&p))
                 .unwrap_or(false),

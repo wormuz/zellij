@@ -2,11 +2,13 @@ mod action_picker;
 mod bindings_list;
 mod blocks_screen;
 mod contrast;
+mod help;
 mod keybindings_screen;
 mod keys_screen;
 mod list_editor;
 mod mousebindings_screen;
 mod page;
+mod plugin_settings;
 mod settings;
 mod settings_screen;
 mod setup_screen;
@@ -87,10 +89,11 @@ impl ZellijPlugin for State {
                 EventType::Visible,
                 EventType::PromptResult,
                 EventType::DesktopIntegration,
+                EventType::PluginSettingsEntries,
             ]);
             set_close_directly(false);
             self.screen = Screen::Settings(SettingsScreen::new());
-            rename_plugin_pane(own_plugin_id, "Configuration");
+            rename_plugin_pane(own_plugin_id, "Settings");
             if let Some(coordinates) = FloatingPaneCoordinates::new(
                 Some("10%".to_owned()),
                 Some("10%".to_owned()),
@@ -147,6 +150,10 @@ impl ZellijPlugin for State {
                 },
                 Event::AvailableKeybindPresets(presets, errors) => {
                     settings_screen.update_keybind_presets(presets, errors);
+                    true
+                },
+                Event::PluginSettingsEntries(entries) => {
+                    settings_screen.update_plugin_settings_entries(entries);
                     true
                 },
                 Event::ConfigFileChangedSinceRead => {

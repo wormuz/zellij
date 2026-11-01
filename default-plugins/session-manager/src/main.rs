@@ -1,4 +1,5 @@
 mod app_panel;
+mod badge_colors;
 mod help;
 mod inbox;
 mod new_session_info;
@@ -56,6 +57,7 @@ pub(crate) struct State {
     app_quit: bool,
     app_panel_initial_view: Option<String>,
     app_panel_auto_pending: bool,
+    app_panel_view_shown: bool,
     app_panel_cols: usize,
     session_name: Option<String>,
     pub(crate) sessions: SessionList,
@@ -70,6 +72,7 @@ pub(crate) struct State {
     is_multi_screen: bool,
     pub(crate) single_screen_state: SingleScreenState,
     pub(crate) show_kill_all_sessions_warning: bool,
+    pub(crate) pending_delete_exited: bool,
     pub(crate) pending_session_stop: Option<String>,
     request_ids: Vec<String>,
     is_web_client: bool,
@@ -93,7 +96,6 @@ pub(crate) struct State {
     last_cols: usize,
     desktop_offer: DesktopOffer,
     sessions_live_layout: Option<inbox::LiveLayout>,
-    clicked_tree_row: Option<(String, session_tree::TreeNode)>,
 }
 
 #[derive(Default)]
@@ -106,7 +108,7 @@ struct DesktopOffer {
 
 #[derive(Debug, Clone)]
 struct PendingWindow {
-    request: SessionWindowRequest,
+    request: SessionTerminalRequest,
     leave: bool,
     from_layout_list: bool,
 }
@@ -124,7 +126,7 @@ fn reminder_context(mode_info: &ModeInfo) -> desktop_integration::ReminderContex
     desktop_integration::ReminderContext {
         show_startup_tips: enabled(SettingKey::ShowStartupTips),
         show_release_notes: enabled(SettingKey::ShowReleaseNotes),
-        inside_desktop_window: mode_info.remote_client.is_none() && !web_client,
+        inside_desktop_terminal: mode_info.remote_client.is_none() && !web_client,
         web_client,
     }
 }
@@ -220,11 +222,11 @@ impl ZellijPlugin for State {
                         .get("away_since_ms")
                         .and_then(|v| v.parse::<u64>().ok());
                 },
-                Some("card") | Some("card_focused") => {
+                Some("manager_focused") => {
                     self.panel.popup_focused = true;
-                    self.panel.is_popup = true;
+                    self.panel.is_popup = false;
                     self.panel.size = Some(PanelSize::Manager);
-                    self.panel.needs_initial_layout = true;
+                    self.panel.needs_initial_layout = false;
                     self.inbox.tab = BrowserTab::Sessions;
                     self.inbox.tab_chosen = true;
                     self.inbox.select_newest_on_arrival = true;
@@ -296,7 +298,7 @@ impl ZellijPlugin for State {
 
 impl State {
     fn settle_inbox_hold(&mut self) -> bool {
-        if self.is_visible && self.inbox_is_shown() {
+        if self.is_visible && self.browser_is_open() {
             return self.forget_closed_inbox_panes();
         }
         self.inbox.forget_listed();
@@ -380,10 +382,11 @@ impl State {
                 self.is_visible = is_visible;
                 if !is_visible {
                     self.inbox.clear_live_view();
+                    self.app_panel_view_shown = false;
                 }
                 if is_visible && !was_visible {
                     self.panel.request_suggestions();
-                    should_render = self.inbox_is_shown();
+                    should_render = true;
                     if !app_panel::is_enabled()
                         && self.panel.size == Some(PanelSize::Manager)
                         && self.shows_browser_tabs()
@@ -409,7 +412,7 @@ impl State {
                 }
                 if let Some(session_name) = mode_info.session_name.as_ref() {
                     if !self.is_welcome_screen {
-                        self.session_name = Some(session_name.clone());
+                        self.set_session_name(session_name);
                     }
                 }
                 self.colors = Colors::new(mode_info.style.colors);
@@ -433,7 +436,7 @@ impl State {
                     if session_info.is_current_session {
                         self.new_session_info
                             .update_layout_list(session_info.available_layouts.clone());
-                        self.session_name = Some(session_info.name.clone());
+                        self.set_session_name(&session_info.name);
                     }
                 }
                 self.refresh_layout_list();
@@ -487,6 +490,7 @@ impl State {
                 }
             },
             Event::GlobalAttentionUpdate(global) => {
+                badge_colors::set(&global.badge_colors);
                 self.panel.attention = Some(global.clone());
                 should_render = self.inbox.update_global(global);
                 if self.away_card_is_empty() {
@@ -622,7 +626,9 @@ impl State {
                 .plan_live_layout(0, 1, cols, rows.saturating_sub(1))
                 .is_some();
         }
-        if self.inbox_browser_will_render() {
+        if !self.is_visible {
+            self.inbox.clear_live_view();
+        } else if self.inbox_browser_will_render() {
             self.inbox
                 .prepare_live_view(0, 1, cols, rows.saturating_sub(1));
         } else if let Some((layout, target)) = self.plan_sessions_live_view(rows, cols) {
@@ -888,6 +894,7 @@ impl State {
         use help::hint;
         if self.renaming_session_name.is_some()
             || self.show_kill_all_sessions_warning
+            || self.pending_delete_exited
             || self.pending_session_stop.is_some()
             || self.single_screen_state.mode == SingleScreenMode::SelectingLayout
         {
@@ -909,6 +916,9 @@ impl State {
         }
         if !self.is_welcome_screen {
             secondary.push(hint("<ESC>", "close"));
+        }
+        if self.exited_session_count() > 0 {
+            secondary.push(hint("<Shift Del>", "delete all exited"));
         }
         secondary.push(hint("<F1>", "all keys"));
         (primary, secondary)
@@ -1017,6 +1027,14 @@ impl State {
                             render_renaming_session_screen(new_session_name, height, width, x, y);
                         } else if self.show_kill_all_sessions_warning {
                             self.render_kill_all_sessions_warning(height, width, x, y);
+                        } else if self.pending_delete_exited {
+                            render_delete_exited_warning(
+                                self.exited_session_count(),
+                                height,
+                                width,
+                                x,
+                                y,
+                            );
                         } else if let Some(name) = self.pending_session_stop.as_ref() {
                             render_stop_session_warning(name, height, width, x, y);
                         } else {
@@ -1560,6 +1578,23 @@ impl State {
             return true;
         }
 
+        if self.pending_delete_exited {
+            match key.bare_key {
+                BareKey::Char('y') if key.has_no_modifiers() => {
+                    self.pending_delete_exited = false;
+                    self.delete_all_exited_sessions();
+                },
+                BareKey::Char('n') | BareKey::Esc if key.has_no_modifiers() => {
+                    self.pending_delete_exited = false;
+                },
+                BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                    self.pending_delete_exited = false;
+                },
+                _ => return false,
+            }
+            return true;
+        }
+
         // Handle kill-all warning overlay first
         if self.show_kill_all_sessions_warning {
             match key.bare_key {
@@ -1687,11 +1722,24 @@ impl State {
                     .get_selected_result()
                     .map(|r| r.as_delete_target());
                 match selected {
+                    Some(DeleteTarget::Active(name))
+                        if self.session_name.as_deref() == Some(name.as_str()) =>
+                    {
+                        self.show_error("This is the current session. Quit to stop it.");
+                    },
                     Some(DeleteTarget::Active(name)) => {
                         self.pending_session_stop = Some(name);
                     },
                     Some(target) => self.delete_session_target(target),
                     None => {},
+                }
+                should_render = true;
+            },
+            BareKey::Delete if key.has_only_modifiers(&[KeyModifier::Shift]) => {
+                if self.exited_session_count() == 0 {
+                    self.show_error("There are no exited sessions to delete.");
+                } else {
+                    self.pending_delete_exited = true;
                 }
                 should_render = true;
             },
@@ -1942,7 +1990,13 @@ impl State {
                                     is_current_session, ..
                                 } => {
                                     if *is_current_session {
-                                        self.show_error("Already attached...");
+                                        if self.panel.size.is_some() {
+                                            self.panel.size = None;
+                                            self.panel.report_size();
+                                            switched_session = true;
+                                        } else {
+                                            self.show_error("Already attached...");
+                                        }
                                     } else {
                                         self.open_session(&session_name, true);
                                         switched_session = true;
@@ -2124,7 +2178,25 @@ impl State {
             self.sessions
                 .update_session_name(&old_session_name, new_name);
         }
-        self.session_name = Some(new_name.to_owned());
+        self.set_session_name(new_name);
+    }
+
+    fn set_session_name(&mut self, name: &str) {
+        if self.session_name.as_deref() == Some(name) {
+            return;
+        }
+        self.session_name = Some(name.to_owned());
+        self.inbox.current_session = self.session_name.clone();
+        if self.panel.size == Some(PanelSize::Manager) {
+            self.apply_suggestions_to_list();
+        }
+    }
+
+    fn listed_current_session(&self) -> Option<String> {
+        if app_panel::is_enabled() || self.is_welcome_screen {
+            return None;
+        }
+        self.session_name.clone()
     }
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) {
@@ -2242,6 +2314,28 @@ impl State {
             },
         }
     }
+    fn exited_session_count(&self) -> usize {
+        self.resurrectable_sessions.all_resurrectable_sessions.len()
+    }
+    fn delete_all_exited_sessions(&mut self) {
+        let previous_index = self.single_screen_state.selected_index;
+        match delete_all_dead_sessions() {
+            Ok(()) => {
+                self.resurrectable_sessions
+                    .all_resurrectable_sessions
+                    .clear();
+                self.single_screen_state.update_search_term(
+                    &self.sessions.session_ui_infos,
+                    &self.resurrectable_sessions.all_resurrectable_sessions,
+                );
+                self.single_screen_state
+                    .restore_selection_after_delete(previous_index);
+            },
+            Err(e) => {
+                self.show_error(&format!("Failed to delete the exited sessions: {}", e));
+            },
+        }
+    }
     pub(crate) fn render_kill_all_sessions_warning(
         &self,
         rows: usize,
@@ -2286,6 +2380,42 @@ pub(crate) fn stop_session_warning_lines(name: &str) -> (String, String) {
     )
 }
 
+pub(crate) fn delete_exited_warning_lines(count: usize) -> (String, String) {
+    (
+        format!(
+            "This will delete all {} exited {}",
+            count,
+            if count == 1 { "session" } else { "sessions" }
+        ),
+        "Are you sure? (y/n)".to_owned(),
+    )
+}
+
+fn render_delete_exited_warning(count: usize, rows: usize, columns: usize, x: usize, y: usize) {
+    if rows == 0 || columns == 0 {
+        return;
+    }
+    let (warning, confirmation) = delete_exited_warning_lines(count);
+    let count_start = "This will delete all ".chars().count();
+    let count_end = count_start + count.to_string().chars().count();
+    let warning_x = x + columns.saturating_sub(warning.chars().count()) / 2;
+    let confirmation_x = x + columns.saturating_sub(confirmation.chars().count()) / 2;
+    print_text_with_coordinates(
+        Text::from(warning.as_str()).color_range(0, count_start..count_end),
+        warning_x,
+        y + (rows / 2).saturating_sub(1),
+        Some(columns),
+        None,
+    );
+    print_text_with_coordinates(
+        Text::from(confirmation.as_str()).color_indices(2, vec![15, 17]),
+        confirmation_x,
+        y + (rows / 2) + 1,
+        None,
+        None,
+    );
+}
+
 fn render_stop_session_warning(name: &str, rows: usize, columns: usize, x: usize, y: usize) {
     if rows == 0 || columns == 0 {
         return;
@@ -2327,8 +2457,8 @@ fn remote_window_warning_lines(remote: &str, leave: bool) -> Vec<String> {
     lines
 }
 
-fn run_window_request(request: SessionWindowRequest) {
-    request_session_window(request);
+fn run_window_request(request: SessionTerminalRequest) {
+    request_session_terminal(request);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2465,12 +2595,12 @@ impl State {
             OpenWay::DisconnectOthers => target.running,
         }
     }
-    fn window_request_for(&self, target: &OpenTarget) -> Result<SessionWindowRequest, String> {
+    fn window_request_for(&self, target: &OpenTarget) -> Result<SessionTerminalRequest, String> {
         match (target.name.as_deref(), target.exists, target.running) {
             (Some(name), true, true) => {
-                Ok(SessionWindowRequest::existing(name, target.pane, false))
+                Ok(SessionTerminalRequest::existing(name, target.pane, false))
             },
-            (Some(name), true, false) => Ok(SessionWindowRequest::existing(name, None, true)),
+            (Some(name), true, false) => Ok(SessionTerminalRequest::existing(name, None, true)),
             (name, _, _) => {
                 if let Some(name) = name {
                     if name.len() >= 108 {
@@ -2480,7 +2610,7 @@ impl State {
                         return Err("Session name cannot contain '/'".to_owned());
                     }
                 }
-                Ok(SessionWindowRequest::new_session(
+                Ok(SessionTerminalRequest::new_session(
                     name,
                     Some(self.default_layout_info()),
                     self.single_screen_state.new_session_folder.clone(),
@@ -2501,6 +2631,7 @@ impl State {
         if self.active_screen != ActiveScreen::SingleScreen
             || self.renaming_session_name.is_some()
             || self.show_kill_all_sessions_warning
+            || self.pending_delete_exited
             || self.pending_session_stop.is_some()
         {
             return None;
@@ -2636,7 +2767,7 @@ impl State {
         } else {
             Some(typed.as_str())
         };
-        let request = SessionWindowRequest::new_session(
+        let request = SessionTerminalRequest::new_session(
             name,
             self.single_screen_state.layout_list.selected_layout_info(),
             self.single_screen_state.new_session_folder.clone(),
@@ -2794,7 +2925,10 @@ impl State {
         if self.renaming_session_name.is_some() {
             return vec![hint("<ENTER>", "rename"), hint("<ESC>", "cancel")];
         }
-        if self.show_kill_all_sessions_warning || self.pending_session_stop.is_some() {
+        if self.show_kill_all_sessions_warning
+            || self.pending_delete_exited
+            || self.pending_session_stop.is_some()
+        {
             return vec![hint("<y>", "confirm"), hint("<n>", "cancel")];
         }
         let mut hints = vec![];
@@ -2822,6 +2956,9 @@ impl State {
         hints.push(hint("<Ctrl l>", "new session with a layout"));
         hints.push(hint("<Ctrl r>", "rename this session"));
         hints.push(hint("<Del>", "stop or delete the selected session"));
+        if self.exited_session_count() > 0 {
+            hints.push(hint("<Shift Del>", "delete all exited sessions"));
+        }
         if !app_panel::is_enabled() && !self.is_welcome_screen {
             hints.push(hint(
                 "<Ctrl a>",
@@ -2832,7 +2969,10 @@ impl State {
             ));
         }
         if self.sessions_live_target().is_some() {
-            hints.push(hint(inbox::TYPE_KEY, "type into the shown pane"));
+            hints.push(hint(
+                inbox::TYPE_KEY,
+                "type into the shown pane (again to stop)",
+            ));
             hints.push(hint("<click the view>", "type into the shown pane"));
             hints.push(hint(
                 self.inbox.release_key_text(),
@@ -2882,7 +3022,7 @@ impl State {
         let mut hints = if self.inbox.live_mode {
             vec![
                 hint("<ENTER>", "go to the pane"),
-                hint(inbox::TYPE_KEY, "type into the shown pane"),
+                hint(inbox::TYPE_KEY, "type into the shown pane (again to stop)"),
                 hint("<click the view>", "type into the shown pane"),
                 hint(
                     "<z>",
@@ -2960,6 +3100,15 @@ impl State {
         tab: Option<usize>,
         pane: Option<(u32, bool)>,
     ) {
+        if is_running && self.listed_current_session().as_deref() == Some(name) {
+            match (pane, tab) {
+                (Some((pane_id, true)), _) => focus_session_pane(name, PaneId::Plugin(pane_id)),
+                (Some((pane_id, false)), _) => focus_session_pane(name, PaneId::Terminal(pane_id)),
+                (None, Some(tab)) => go_to_tab(tab as u32),
+                (None, None) => {},
+            }
+            return;
+        }
         if self.open_disconnecting && is_running {
             switch_session_with_options(ConnectToSession {
                 name: Some(name.to_owned()),
@@ -3051,7 +3200,43 @@ impl State {
                 2
             }
         });
-        let ordered_names: Vec<String> = ordered.iter().map(|s| s.name.clone()).collect();
+        let current = self
+            .listed_current_session()
+            .filter(|name| !suggestions.suggestions.iter().any(|s| s.name == *name));
+        let mut ordered_names: Vec<String> = ordered.iter().map(|s| s.name.clone()).collect();
+        if let Some(current) = current.as_ref() {
+            let first_exited = ordered
+                .iter()
+                .position(|s| !s.is_running)
+                .unwrap_or(ordered.len());
+            ordered_names.insert(first_exited, current.clone());
+            let tab_count = self.last_tab_count.unwrap_or(1).max(1);
+            let pane_count = self.last_terminal_pane_count.unwrap_or(0);
+            running.push(SessionUiInfo {
+                name: current.clone(),
+                tabs: (0..tab_count)
+                    .map(|position| crate::ui::TabUiInfo {
+                        name: format!("Tab #{}", position + 1),
+                        panes: if position == 0 {
+                            (0..pane_count)
+                                .map(|pane_id| crate::ui::PaneUiInfo {
+                                    name: String::new(),
+                                    exit_code: None,
+                                    pane_id: pane_id as u32,
+                                    is_plugin: false,
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        },
+                        position,
+                    })
+                    .collect(),
+                connected_users: 1,
+                is_current_session: true,
+                creation_time: std::time::Duration::from_secs(0),
+            });
+        }
         for suggestion in &suggestions.suggestions {
             if suggestion.is_running {
                 let tab_count = suggestion.tabs.len();
@@ -3101,6 +3286,7 @@ impl State {
                     .set_children_from_tabs(&suggestion.name, &suggestion.tabs);
             }
         }
+        self.panel.current_session = current;
         self.single_screen_state.ordered_names = Some(ordered_names);
         self.sessions.set_sessions(running, vec![]);
         self.resurrectable_sessions.update(resumable);
@@ -3147,9 +3333,9 @@ impl State {
                 let fetch = !is_running || self.sessions_live_target().is_none();
                 let (tab, pane) = if self.panel.tree.node_session == name {
                     match self.panel.tree.node {
-                        session_tree::TreeNode::Exited | session_tree::TreeNode::Session => {
-                            (None, None)
-                        },
+                        session_tree::TreeNode::Exited
+                        | session_tree::TreeNode::Recent
+                        | session_tree::TreeNode::Session => (None, None),
                         session_tree::TreeNode::Tab(tab) => (Some(tab), None),
                         session_tree::TreeNode::Pane(tab, pane) => (Some(tab), Some(pane)),
                     }
@@ -3179,6 +3365,7 @@ impl State {
         let size = self.panel.size?;
         if self.renaming_session_name.is_some()
             || self.show_kill_all_sessions_warning
+            || self.pending_delete_exited
             || self.pending_session_stop.is_some()
             || self.single_screen_state.mode != single_screen::SingleScreenMode::SearchAndSelect
         {
@@ -3192,7 +3379,7 @@ impl State {
                         self.open_tree_child();
                         Some(true)
                     },
-                    BareKey::Delete => Some(false),
+                    BareKey::Delete if key.has_no_modifiers() => Some(false),
                     BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Ctrl]) => Some(false),
                     _ => self.handle_manager_key(key),
                 }
@@ -3305,18 +3492,15 @@ impl State {
         )
     }
     fn tree_select(&mut self, index: usize) {
-        self.clicked_tree_row = None;
+        let index = if self.panel.tree.is_heading(index) {
+            index + 1
+        } else {
+            index
+        };
         self.tree_point_at(index);
         self.panel.tree.follow = true;
     }
-    fn tree_row_identity(&self, index: usize) -> Option<(String, session_tree::TreeNode)> {
-        self.panel
-            .tree
-            .rows
-            .get(index)
-            .map(|row| (row.session.clone(), row.node))
-    }
-    fn is_second_click_on(&self, index: usize) -> bool {
+    fn is_click_on_selected(&self, index: usize) -> bool {
         let exited_header = self
             .panel
             .tree
@@ -3324,12 +3508,17 @@ impl State {
             .get(index)
             .map(|row| row.node == session_tree::TreeNode::Exited)
             .unwrap_or(false);
-        if exited_header {
-            return true;
+        exited_header || self.tree_cursor() == Some(index)
+    }
+    fn hover_tree_row(&mut self, index: Option<usize>) -> bool {
+        let hovered = index
+            .filter(|index| !self.panel.tree.is_heading(*index))
+            .and_then(|index| self.panel.tree.identity(index));
+        if hovered == self.panel.tree.hovered {
+            return false;
         }
-        self.tree_cursor() == Some(index)
-            && self.clicked_tree_row.is_some()
-            && self.clicked_tree_row == self.tree_row_identity(index)
+        self.panel.tree.hovered = hovered;
+        true
     }
     fn tree_point_at(&mut self, index: usize) {
         let Some(row) = self.panel.tree.rows.get(index).cloned() else {
@@ -3345,11 +3534,14 @@ impl State {
         if len == 0 {
             return;
         }
-        let next = match self.tree_cursor() {
+        let mut next = match self.tree_cursor() {
             Some(cursor) => (cursor as isize + delta).clamp(0, len as isize - 1) as usize,
             None if delta < 0 => len - 1,
             None => 0,
         };
+        if self.panel.tree.is_heading(next) && delta < 0 && next > 0 {
+            next -= 1;
+        }
         self.tree_select(next);
     }
     fn tree_right(&mut self) {
@@ -3396,7 +3588,8 @@ impl State {
         }
         let parent = self.panel.tree.rows[..cursor]
             .iter()
-            .rposition(|r| r.depth < row.depth);
+            .rposition(|r| r.depth < row.depth)
+            .filter(|parent| !self.panel.tree.is_heading(*parent));
         if let Some(parent) = parent {
             self.tree_select(parent);
         }
@@ -3415,7 +3608,7 @@ impl State {
                 self.panel.tree.follow = true;
                 return true;
             },
-            TreeNode::Session => return false,
+            TreeNode::Recent | TreeNode::Session => return false,
             TreeNode::Tab(tab) => (tab, None),
             TreeNode::Pane(tab, pane) => (tab, Some(pane)),
         };
@@ -3492,10 +3685,12 @@ impl State {
         self.panel.size == Some(PanelSize::Card) || self.inbox_is_shown()
     }
     fn inbox_is_shown(&self) -> bool {
-        self.panel.size == Some(PanelSize::Manager)
-            && self.shows_browser_tabs()
+        self.browser_is_open()
             && self.inbox.tab == BrowserTab::Inbox
             && self.renaming_session_name.is_none()
+    }
+    fn browser_is_open(&self) -> bool {
+        self.panel.size == Some(PanelSize::Manager) && self.shows_browser_tabs()
     }
     fn running_session_count(&self) -> usize {
         self.inbox
@@ -3516,7 +3711,7 @@ impl State {
             self.show_app_panel_view(Some(&view));
             return true;
         }
-        if attention && self.app_panel_auto_pending && self.inbox.counted_count() > 0 {
+        if attention && self.app_panel_auto_pending && self.inbox.has_rows() {
             self.app_panel_auto_pending = false;
             if self.inbox.tab != BrowserTab::Inbox {
                 self.show_app_panel_view(Some("inbox"));
@@ -3569,6 +3764,17 @@ impl State {
     }
 
     fn show_app_panel_view(&mut self, view: Option<&str>) {
+        let keeps_the_inbox = self.app_panel_view_shown
+            && !self.app_quit
+            && self.panel.size == Some(PanelSize::Manager)
+            && self.inbox.tab == BrowserTab::Inbox
+            && matches!(view, None | Some("auto") | Some("inbox"));
+        self.app_panel_view_shown = true;
+        self.panel.tree.hovered = None;
+        self.inbox.hovered = None;
+        if keeps_the_inbox {
+            return;
+        }
         self.app_quit = view == Some("quit");
         self.panel.size = Some(PanelSize::Manager);
         if self.app_quit {
@@ -3579,7 +3785,7 @@ impl State {
         self.single_screen_state.selected_index = None;
         let tab = match view {
             Some("sessions") => BrowserTab::Sessions,
-            _ if self.inbox.counted_count() == 0 => BrowserTab::Sessions,
+            _ if !self.inbox.has_rows() => BrowserTab::Sessions,
             _ => BrowserTab::Inbox,
         };
         self.switch_browser_tab(tab);
@@ -3598,6 +3804,9 @@ impl State {
     }
 
     fn switch_browser_tab(&mut self, tab: BrowserTab) {
+        if self.inbox.tab != tab {
+            self.inbox.leave_tab();
+        }
         self.inbox.tab = tab;
         self.inbox.tab_chosen = true;
         self.inbox.select_newest_on_arrival = false;
@@ -3633,7 +3842,7 @@ impl State {
                 self.inbox.tab = BrowserTab::Inbox;
                 self.inbox.tab_chosen = true;
             },
-            None if self.inbox.counted_count() == 0 && !self.inbox_requested => {
+            None if !self.inbox.has_rows() && !self.inbox_requested => {
                 self.inbox.tab = BrowserTab::Sessions;
                 self.inbox.tab_chosen = true;
             },
@@ -3819,6 +4028,17 @@ impl State {
                 self.inbox.move_selection(-(lines.max(1) as isize));
                 true
             },
+            Mouse::Hover(line, column) if !typing => {
+                let hovered = match self.inbox.browser_target_at(line, column) {
+                    Some(BrowserTarget::Item(key)) => Some(key),
+                    _ => None,
+                };
+                if hovered == self.inbox.hovered {
+                    return false;
+                }
+                self.inbox.hovered = hovered;
+                true
+            },
             _ => false,
         }
     }
@@ -3883,17 +4103,16 @@ impl State {
                     }
                     let typing = self.inbox.is_capturing();
                     match self.tree_row_at(line, column) {
+                        Some(index) if self.panel.tree.is_heading(index) => false,
                         Some(index) if typing => {
                             self.tree_point_at(index);
                             true
                         },
-                        Some(index) if !self.is_second_click_on(index) => {
+                        Some(index) if !self.is_click_on_selected(index) => {
                             self.tree_point_at(index);
-                            self.clicked_tree_row = self.tree_row_identity(index);
                             true
                         },
                         Some(index) => {
-                            self.clicked_tree_row = None;
                             self.tree_point_at(index);
                             if !self.open_tree_child() {
                                 self.handle_selection();
@@ -3908,12 +4127,9 @@ impl State {
                 {
                     false
                 },
-                Mouse::Hover(line, column) => match self.tree_row_at(line, column) {
-                    Some(index) if self.tree_cursor() != Some(index) => {
-                        self.tree_point_at(index);
-                        true
-                    },
-                    _ => false,
+                Mouse::Hover(line, column) => {
+                    let index = self.tree_row_at(line, column);
+                    self.hover_tree_row(index)
                 },
                 Mouse::ScrollDown(lines) => {
                     self.tree_move(lines.max(1) as isize);
@@ -4060,7 +4276,7 @@ mod live_view_state_tests {
         let mut state = browser();
         state.remote_client = Some("from a terminal".to_owned());
         state.pending_remote_window = Some(PendingWindow {
-            request: SessionWindowRequest::existing("api", None, true),
+            request: SessionTerminalRequest::existing("api", None, true),
             leave: false,
             from_layout_list: false,
         });
@@ -4089,12 +4305,88 @@ mod live_view_state_tests {
         let mut state = browser();
         state.update(Event::Visible(false));
         assert_eq!(state.inbox.live_view_sent, None);
+        state.render_plugin(16, 88);
+        assert_eq!(
+            state.inbox.live_view_sent, None,
+            "a hidden plugin does not show the view again when it redraws"
+        );
+        state.update(Event::Visible(true));
+        state.render_plugin(16, 88);
+        assert!(state.inbox.live_view_sent.is_some());
+    }
+
+    fn only_web_is_left() -> GlobalAttention {
+        let mut attention = SessionAttention::default();
+        let item = attention_item("web", 2);
+        attention.counts.add(&item.attention);
+        attention.items.push(item);
+        GlobalAttention::build(
+            "here",
+            vec![
+                ("here".to_owned(), Default::default()),
+                ("api".to_owned(), Default::default()),
+                ("web".to_owned(), attention),
+            ],
+        )
+    }
+
+    fn nothing_is_left() -> GlobalAttention {
+        GlobalAttention::build(
+            "here",
+            vec![
+                ("here".to_owned(), Default::default()),
+                ("api".to_owned(), Default::default()),
+                ("web".to_owned(), Default::default()),
+            ],
+        )
+    }
+
+    #[test]
+    fn an_item_read_in_the_inbox_stays_across_a_tab_switch_until_the_browser_closes() {
+        let mut state = browser();
+        let api = key_of("api", 1);
+        state.inbox.update_global(only_web_is_left());
+        state.settle_inbox_hold();
+        assert!(state.inbox.is_held(&api));
+        state.switch_browser_tab(BrowserTab::Sessions);
+        state.render_plugin(16, 88);
+        state.settle_inbox_hold();
+        state.switch_browser_tab(BrowserTab::Inbox);
+        state.render_plugin(16, 88);
+        state.settle_inbox_hold();
+        assert!(state.inbox.is_held(&api), "the tab switch keeps it");
+        state.update(Event::Visible(false));
+        assert!(!state.inbox.is_held(&api), "closing lets it go");
+    }
+
+    #[test]
+    fn a_repeated_auto_view_keeps_the_inbox_and_the_item_just_read() {
+        let mut state = browser();
+        let api = key_of("api", 1);
+        state.show_app_panel_view(Some("auto"));
+        state.render_plugin(16, 88);
+        assert!(state.inbox.is_selected(&api));
+        state.inbox.update_global(nothing_is_left());
+        assert_eq!(state.inbox.counted_count(), 0);
+        state.show_app_panel_view(Some("auto"));
+        assert_eq!(state.inbox.tab, BrowserTab::Inbox);
+        assert!(state.inbox.is_selected(&api));
+        state.show_app_panel_view(Some("inbox"));
+        assert_eq!(state.inbox.tab, BrowserTab::Inbox);
+        assert!(state.inbox.is_selected(&api));
+        state.update(Event::Visible(false));
+        state.show_app_panel_view(Some("auto"));
+        assert_eq!(
+            state.inbox.tab,
+            BrowserTab::Sessions,
+            "a fresh open with nothing left shows the sessions"
+        );
     }
 
     #[test]
     fn a_narrow_browser_lists_the_items_without_a_live_view() {
         let mut state = browser();
-        state.render_plugin(16, 60);
+        state.render_plugin(16, 50);
         assert_eq!(state.inbox.live_view_sent, None);
         assert!(!state.inbox.shows_live_view());
     }
@@ -4120,7 +4412,7 @@ mod live_view_state_tests {
         assert_eq!(go.inbox.capture_target, None);
         assert_eq!(go.panel.size, None);
         let mut narrow = browser();
-        narrow.render_plugin(16, 60);
+        narrow.render_plugin(16, 50);
         narrow.handle_inbox_key(alt_enter());
         assert_eq!(narrow.inbox.capture_target, None);
         assert_eq!(narrow.panel.size, Some(PanelSize::Manager));
@@ -4254,6 +4546,19 @@ mod live_view_state_tests {
         assert!(state.handle_inbox_mouse(Mouse::LeftClick(line, column)));
         assert_eq!(state.inbox.capture_target, None, "a row click never types");
         assert_eq!(state.panel.size, None, "the second click goes to the pane");
+    }
+
+    #[test]
+    fn a_hover_on_an_inbox_row_only_marks_it() {
+        let mut state = browser();
+        let web = key_of("web", 2);
+        let selected = state.inbox.selection.clone();
+        let (line, column) = row_of(&state, &web);
+        assert!(state.handle_inbox_mouse(Mouse::Hover(line, column)));
+        assert_eq!(state.inbox.hovered, Some(web.clone()));
+        assert_eq!(state.inbox.selection, selected);
+        assert!(!state.inbox.is_selected(&web));
+        assert!(!state.handle_inbox_mouse(Mouse::Hover(line, column)));
     }
 
     #[test]
@@ -4428,10 +4733,11 @@ mod sessions_live_view_tests {
             "a session whose focused pane is a plugin keeps the snapshot"
         );
         select(&mut state, 6);
-        assert!(state.on_exited_header());
-        assert_eq!(shown(&state), None);
-        expand(&mut state);
-        select(&mut state, 7);
+        assert_eq!(
+            state.tree_cursor(),
+            Some(7),
+            "the Recent heading is skipped"
+        );
         assert_eq!(
             state.selected_session(),
             Some(("old".to_owned(), false, false))
@@ -4518,6 +4824,29 @@ mod sessions_live_view_tests {
         state.switch_browser_tab(BrowserTab::Sessions);
         state.render_plugin(ROWS, COLS);
         assert_eq!(shown(&state), api(2), "the sessions move it back");
+        state.switch_browser_tab(BrowserTab::Inbox);
+        state.render_plugin(ROWS, COLS);
+        assert!(state.inbox.start_typing());
+        state.inbox.apply_live_view_status(inbox::LiveViewStatus {
+            target: Some(PaneAddress::local("web", PaneId::Terminal(7))),
+            state: MirrorState::Live,
+            input_captured: true,
+            input_released_by: None,
+            resize_allowed: true,
+            pinned: true,
+            source_size: None,
+            release_key: "F9".to_owned(),
+        });
+        state.render_plugin(ROWS, COLS);
+        assert_eq!(shown(&state), Some(("web".to_owned(), PaneId::Terminal(7))));
+        state.switch_browser_tab(BrowserTab::Sessions);
+        state.render_plugin(ROWS, COLS);
+        assert_eq!(
+            shown(&state),
+            api(2),
+            "typing into the inbox item ends with the tab and the sessions show their own pane"
+        );
+        assert_eq!(state.inbox.capture_target, None);
     }
 
     #[test]
@@ -4606,35 +4935,74 @@ mod sessions_live_view_tests {
     }
 
     #[test]
-    fn a_hover_does_not_count_as_the_first_click() {
+    fn a_hover_only_marks_the_row_and_leaves_the_selection_and_preview_alone() {
         let mut state = sessions_browser();
         state.tree_select(1);
         state.render_plugin(ROWS, COLS);
+        let before = state.inbox.live_view_sent.clone();
         let (api_line, api_column) = tree_row_target(&state, 0);
         assert!(state.handle_mouse(Mouse::Hover(api_line, api_column)));
-        assert_eq!(state.tree_cursor(), Some(0));
+        assert_eq!(state.tree_cursor(), Some(1), "the hover does not select");
+        assert_eq!(
+            state.panel.tree.hovered,
+            Some(("api".to_owned(), session_tree::TreeNode::Session))
+        );
+        assert!(!state.handle_mouse(Mouse::Hover(api_line, api_column)));
         state.render_plugin(ROWS, COLS);
+        assert_eq!(state.inbox.live_view_sent, before, "the preview stays");
         assert!(state.handle_mouse(Mouse::LeftClick(api_line, api_column)));
         assert!(
             state.single_screen_state.selected_index.is_some(),
-            "a click after a hover only selects"
+            "a click on a hovered row that is not selected only selects"
         );
+        assert_eq!(state.tree_cursor(), Some(0));
         state.render_plugin(ROWS, COLS);
         assert!(state.handle_mouse(Mouse::LeftClick(api_line, api_column)));
         assert_eq!(state.single_screen_state.selected_index, None);
     }
 
     #[test]
-    fn a_click_after_moving_with_the_keys_only_selects() {
+    fn a_click_on_a_row_selected_with_the_keys_opens_it() {
         let mut state = sessions_browser();
-        let (api_line, api_column) = tree_row_target(&state, 0);
-        assert!(state.handle_mouse(Mouse::LeftClick(api_line, api_column)));
         state.tree_move(1);
         state.tree_move(-1);
         state.render_plugin(ROWS, COLS);
+        let (api_line, api_column) = tree_row_target(&state, 0);
         assert!(state.handle_mouse(Mouse::LeftClick(api_line, api_column)));
-        assert!(state.single_screen_state.selected_index.is_some());
+        assert_eq!(state.single_screen_state.selected_index, None);
         assert_eq!(state.inbox.capture_target, None);
+    }
+
+    #[test]
+    fn a_click_on_the_row_selected_when_the_panel_opens_opens_it() {
+        let mut state = sessions_browser();
+        let (api_line, api_column) = tree_row_target(&state, 0);
+        assert_eq!(state.tree_cursor(), Some(0));
+        assert!(state.handle_mouse(Mouse::LeftClick(api_line, api_column)));
+        assert_eq!(state.single_screen_state.selected_index, None);
+    }
+
+    #[test]
+    fn the_recent_heading_cannot_be_selected_or_clicked() {
+        let mut state = sessions_browser();
+        let heading = state
+            .panel
+            .tree
+            .rows
+            .iter()
+            .position(|row| row.node == session_tree::TreeNode::Recent)
+            .expect("the exited session is recent");
+        select(&mut state, heading - 1);
+        state.tree_move(1);
+        state.render_plugin(ROWS, COLS);
+        assert_eq!(state.tree_cursor(), Some(heading + 1));
+        state.tree_move(-1);
+        state.render_plugin(ROWS, COLS);
+        assert_eq!(state.tree_cursor(), Some(heading - 1));
+        let (line, column) = tree_row_target(&state, heading);
+        assert!(!state.handle_mouse(Mouse::LeftClick(line, column)));
+        assert!(!state.handle_mouse(Mouse::Hover(line, column)));
+        assert_eq!(state.panel.tree.hovered, None);
     }
 
     #[test]
@@ -4651,8 +5019,6 @@ mod sessions_live_view_tests {
         );
         assert_eq!(state.panel.size, Some(PanelSize::Manager));
         let mut exited = sessions_browser();
-        select(&mut exited, 2);
-        expand(&mut exited);
         select(&mut exited, 3);
         assert!(exited.selected_session_is_exited());
         assert_eq!(exited.handle_manager_key(&alt_enter), Some(false));
@@ -4675,8 +5041,6 @@ mod sessions_live_view_tests {
         let shift_up = KeyWithModifier::new(BareKey::Up).with_shift_modifier();
         assert_eq!(state.handle_manager_key(&shift_up), None);
         assert_eq!(state.panel.preview_pan, panel::PreviewPan::default());
-        select(&mut state, 2);
-        expand(&mut state);
         select(&mut state, 3);
         assert!(state.selected_session_is_exited());
         let hints = state.sessions_hints(true);
@@ -4685,5 +5049,112 @@ mod sessions_live_view_tests {
         assert!(!hints.iter().any(|hint| hint.key == inbox::TYPE_KEY));
         assert_eq!(state.handle_manager_key(&shift_up), Some(true));
         assert!(state.panel.preview_pan.rows_up > 0);
+    }
+
+    fn with_current_session() -> (State, usize) {
+        let mut state = sessions_browser();
+        state.set_session_name("here");
+        state.panel.tree.set_children_from_tabs(
+            "here",
+            &[tab("main", true, vec![pane(8, "editor", true, false)])],
+        );
+        state.render_plugin(ROWS, COLS);
+        let index = state
+            .panel
+            .tree
+            .rows
+            .iter()
+            .position(|row| row.session == "here")
+            .expect("the current session is listed");
+        (state, index)
+    }
+
+    fn sent_resize_allowed(state: &State) -> Option<bool> {
+        state
+            .inbox
+            .live_view_sent
+            .as_ref()
+            .and_then(|view| view.resize_allowed)
+    }
+
+    #[test]
+    fn the_current_session_is_listed_and_its_preview_does_not_resize_its_panes() {
+        let (mut state, index) = with_current_session();
+        let sessions: Vec<String> = state
+            .panel
+            .tree
+            .rows
+            .iter()
+            .filter(|row| row.node == session_tree::TreeNode::Session)
+            .map(|row| row.session.clone())
+            .collect();
+        assert_eq!(sessions, vec!["api", "web", "here", "old"]);
+        select(&mut state, index);
+        assert_eq!(
+            shown(&state),
+            Some(("here".to_owned(), PaneId::Terminal(8)))
+        );
+        assert_eq!(sent_resize_allowed(&state), Some(false));
+        select(&mut state, 0);
+        assert_eq!(shown(&state), api(2));
+        assert_eq!(sent_resize_allowed(&state), Some(false));
+    }
+
+    #[test]
+    fn opening_the_current_session_closes_the_browser_and_it_cannot_be_stopped_from_here() {
+        let (mut state, index) = with_current_session();
+        select(&mut state, index);
+        state.handle_key(KeyWithModifier::new(BareKey::Delete));
+        assert_eq!(state.pending_session_stop, None);
+        assert!(state.error.is_some());
+        state.error = None;
+        state.handle_key(KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(state.panel.size, None);
+    }
+
+    #[test]
+    fn shift_delete_asks_before_deleting_every_exited_session() {
+        let mut state = sessions_browser();
+        assert_eq!(state.exited_session_count(), 1);
+        let shift_delete = KeyWithModifier::new(BareKey::Delete).with_shift_modifier();
+        state.handle_key(shift_delete.clone());
+        assert!(state.pending_delete_exited);
+        assert_eq!(
+            delete_exited_warning_lines(1).0,
+            "This will delete all 1 exited session"
+        );
+        assert!(state
+            .sessions_hints(false)
+            .iter()
+            .any(|hint| hint.key == "<y>"));
+        state.handle_key(KeyWithModifier::new(BareKey::Char('n')));
+        assert!(!state.pending_delete_exited);
+        assert_eq!(state.exited_session_count(), 1);
+        let heading = state
+            .panel
+            .tree
+            .rows
+            .iter()
+            .position(|row| row.node == session_tree::TreeNode::Recent)
+            .expect("the exited session is listed");
+        select(&mut state, heading + 1);
+        state.handle_key(shift_delete);
+        assert!(
+            state.pending_delete_exited,
+            "it also works from an exited row"
+        );
+    }
+
+    #[test]
+    fn the_current_session_is_not_listed_on_the_welcome_screen() {
+        let mut state = sessions_browser();
+        state.is_welcome_screen = true;
+        state.set_session_name("here");
+        assert!(!state
+            .panel
+            .tree
+            .rows
+            .iter()
+            .any(|row| row.session == "here"));
     }
 }

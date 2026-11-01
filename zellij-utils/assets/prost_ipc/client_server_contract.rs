@@ -154,7 +154,7 @@ pub struct RgbColor {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Action {
-    #[prost(oneof="action::ActionType", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 156, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 157, 158, 159, 160, 161, 162, 163, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187")]
+    #[prost(oneof="action::ActionType", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 156, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 157, 158, 159, 160, 161, 162, 163, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193")]
     pub action_type: ::core::option::Option<action::ActionType>,
 }
 /// Nested message and enum types in `Action`.
@@ -525,7 +525,7 @@ pub mod action {
         #[prost(message, tag="182")]
         ToggleTrayIcon(super::ToggleTrayIconAction),
         #[prost(message, tag="183")]
-        OpenSessionInWindow(super::OpenSessionInWindowAction),
+        OpenSessionInTerminal(super::OpenSessionInTerminalAction),
         #[prost(message, tag="184")]
         WaitForPaneExit(super::WaitForPaneExitAction),
         #[prost(message, tag="185")]
@@ -534,6 +534,18 @@ pub mod action {
         UndoRenameSession(super::UndoRenameSessionAction),
         #[prost(message, tag="187")]
         ToggleMirrorResize(super::ToggleMirrorResizeAction),
+        #[prost(message, tag="188")]
+        SetResurrectCommand(super::SetResurrectCommandAction),
+        #[prost(message, tag="189")]
+        ToggleBars(super::ToggleBarsAction),
+        #[prost(message, tag="190")]
+        HideBars(super::HideBarsAction),
+        #[prost(message, tag="191")]
+        ShowBars(super::ShowBarsAction),
+        #[prost(message, tag="192")]
+        HideBarByPaneId(super::HideBarByPaneIdAction),
+        #[prost(message, tag="193")]
+        PasteFromClipboardByPaneId(super::PasteFromClipboardByPaneIdAction),
     }
 }
 // Action message definitions (all 92 variants)
@@ -1427,6 +1439,10 @@ pub struct CliPipeAction {
     pub popup: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, tag="14")]
     pub popup_no_focus: bool,
+    #[prost(bool, tag="15")]
+    pub popup_capture_all_keys: bool,
+    #[prost(string, optional, tag="16")]
+    pub popup_outside_click: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1493,6 +1509,46 @@ pub struct SetPaneColorAction {
     pub fg: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="3")]
     pub bg: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ResurrectCommand {
+    #[prost(string, tag="1")]
+    pub command: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="2")]
+    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub cwd: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetResurrectCommandAction {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(message, optional, tag="2")]
+    pub resurrect: ::core::option::Option<ResurrectCommand>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ToggleBarsAction {
+    #[prost(string, repeated, tag="1")]
+    pub bars: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HideBarsAction {
+    #[prost(string, repeated, tag="1")]
+    pub bars: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShowBarsAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HideBarByPaneIdAction {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2286,6 +2342,12 @@ pub struct Options {
     pub mirror_resizes_source_pane: ::core::option::Option<bool>,
     #[prost(string, optional, tag="84")]
     pub live_view_release_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="85")]
+    pub bars_hidden_on_start: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag="86")]
+    pub hidden_bars_notification: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag="87")]
+    pub mode_hints_when_bars_hidden: ::core::option::Option<bool>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -2581,7 +2643,13 @@ pub struct ToggleTrayIconAction {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OpenSessionInWindowAction {
+pub struct OpenSessionInTerminalAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PasteFromClipboardByPaneIdAction {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4157,7 +4225,7 @@ impl AppStartupMode {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -4237,6 +4305,8 @@ pub mod client_to_server_msg {
         PaneMirror(super::ClientPaneMirrorMsg),
         #[prost(message, tag="36")]
         AdoptSessionHistory(super::AdoptSessionHistoryMsg),
+        #[prost(message, tag="37")]
+        ClipboardPasteSupport(super::ClipboardPasteSupportMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -4464,6 +4534,14 @@ pub struct SetMobileRenderPreferencesMsg {
 pub struct StructuredRenderSupportMsg {
     #[prost(bool, tag="1")]
     pub supported: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClipboardPasteSupportMsg {
+    #[prost(bool, tag="1")]
+    pub supported: bool,
+    #[prost(string, optional, tag="2")]
+    pub shortcut: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4696,7 +4774,7 @@ impl MirrorCloseReason {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -4747,7 +4825,7 @@ pub mod server_to_client_msg {
         #[prost(message, tag="21")]
         HostThemeMode(super::HostThemeModeMsg),
         #[prost(message, tag="22")]
-        WindowSettings(super::WindowSettingsMsg),
+        TerminalSettings(super::TerminalSettingsMsg),
         #[prost(message, tag="23")]
         HostProgramStatus(super::HostProgramStatusMsg),
         #[prost(message, tag="24")]
@@ -4756,6 +4834,8 @@ pub mod server_to_client_msg {
         SessionPreview(super::SessionPreviewMsg),
         #[prost(message, tag="26")]
         PaneMirror(super::ServerPaneMirrorMsg),
+        #[prost(message, tag="27")]
+        PasteFromClipboard(super::PasteFromClipboardMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -4875,7 +4955,7 @@ pub struct ConfigFileUpdatedMsg {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WindowSettingsMsg {
+pub struct TerminalSettingsMsg {
     #[prost(string, tag="1")]
     pub settings_json: ::prost::alloc::string::String,
 }
@@ -4914,6 +4994,12 @@ pub struct ForwardQueryToHostMsg {
     pub query_bytes: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="3")]
     pub resolve_async: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PasteFromClipboardMsg {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

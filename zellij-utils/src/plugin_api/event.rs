@@ -45,7 +45,10 @@ pub use super::generated_api::api::{
         PaneRenderReportPayload as ProtobufPaneRenderReportPayload,
         PaneScrollbackResponse as ProtobufPaneScrollbackResponse, PaneType as ProtobufPaneType,
         PluginConfigurationChangedPayload as ProtobufPluginConfigurationChangedPayload,
-        PluginInfo as ProtobufPluginInfo, PromptResultPayload as ProtobufPromptResultPayload,
+        PluginInfo as ProtobufPluginInfo,
+        PluginSettingsEntriesPayload as ProtobufPluginSettingsEntriesPayload,
+        PluginSettingsEntry as ProtobufPluginSettingsEntry,
+        PromptResultPayload as ProtobufPromptResultPayload,
         ResurrectableSession as ProtobufResurrectableSession, SelectedText as ProtobufSelectedText,
         SessionManifest as ProtobufSessionManifest,
         SoftKeyboardVisibilityChangedPayload as ProtobufSoftKeyboardVisibilityChangedPayload,
@@ -65,13 +68,13 @@ pub use super::generated_api::api::{
 use crate::data::{
     ClickedPaneAction, ClickedTabAction, ClientId, ClientInfo, ContextMenuAction,
     ContextMenuContext, ContextMenuEntry, ContextMenuKind, CopyDestination, Direction, Event,
-    EventType, FileMetadata, HostTerminalThemeMode, InputMode, KeyModifier, KeyWithModifier,
-    KeybindPresetInfo, KeybindPresetSource, KeybindPresetWithError, KeybindsVec, LayoutInfo,
-    LayoutMetadata, ModeInfo, Mouse, NestedSessionEndReason, NestedSessionKeybinds,
+    EventType, FileMetadata, HiddenBars, HostTerminalThemeMode, InputMode, KeyModifier,
+    KeyWithModifier, KeybindPresetInfo, KeybindPresetSource, KeybindPresetWithError, KeybindsVec,
+    LayoutInfo, LayoutMetadata, ModeInfo, Mouse, NestedSessionEndReason, NestedSessionKeybinds,
     NestedSessionKeybindsError, NestedSessionKeybindsResponse, PaneContents, PaneId, PaneInfo,
     PaneManifest, PaneMetadata, PaneScrollbackResponse, PermissionStatus, PluginCapabilities,
-    PluginInfo, SelectedText, SessionInfo, SettingKey, Style, StyledText, TabInfo, TabMetadata,
-    WebServerStatus, WebSharing,
+    PluginInfo, PluginSettingsEntry, SelectedText, SessionInfo, SettingKey, Style, StyledText,
+    TabInfo, TabMetadata, WebServerStatus, WebSharing,
 };
 #[allow(hidden_glob_reexports)]
 use crate::data::{HostId, LiveViewRelease, MirrorClosedReason, MirrorState, PaneAddress};
@@ -708,6 +711,21 @@ impl TryFrom<ProtobufEvent> for Event {
                 },
                 _ => Err("Malformed payload for the DesktopIntegration Event"),
             },
+            Some(ProtobufEventType::PluginSettingsEntries) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::PluginSettingsEntriesPayload(payload)) => {
+                    Ok(Event::PluginSettingsEntries(
+                        payload
+                            .entries
+                            .into_iter()
+                            .map(|entry| PluginSettingsEntry {
+                                plugin_id: entry.plugin_id,
+                                title: entry.title,
+                            })
+                            .collect(),
+                    ))
+                },
+                _ => Err("Malformed payload for the PluginSettingsEntries Event"),
+            },
             Some(ProtobufEventType::LiveViewStateChanged) => match protobuf_event.payload {
                 Some(ProtobufEventPayload::LiveViewStateChangedPayload(payload)) => {
                     Ok(Event::LiveViewStateChanged {
@@ -937,6 +955,7 @@ impl TryFrom<ProtobufEvent> for Event {
                             line: payload.line as usize,
                             column: payload.column as usize,
                             client_id: payload.client_id as ClientId,
+                            paste_shortcut: payload.paste_shortcut,
                         },
                         entries,
                     ))
@@ -1533,6 +1552,20 @@ impl TryFrom<Event> for ProtobufEvent {
                 name: ProtobufEventType::DesktopIntegration as i32,
                 payload: Some(event::Payload::DesktopIntegrationPayload(payload)),
             }),
+            Event::PluginSettingsEntries(entries) => Ok(ProtobufEvent {
+                name: ProtobufEventType::PluginSettingsEntries as i32,
+                payload: Some(event::Payload::PluginSettingsEntriesPayload(
+                    ProtobufPluginSettingsEntriesPayload {
+                        entries: entries
+                            .into_iter()
+                            .map(|entry| ProtobufPluginSettingsEntry {
+                                plugin_id: entry.plugin_id,
+                                title: entry.title,
+                            })
+                            .collect(),
+                    },
+                )),
+            }),
             Event::LiveViewStateChanged {
                 target,
                 state,
@@ -1845,6 +1878,7 @@ impl TryFrom<Event> for ProtobufEvent {
                             column: context.column as u32,
                             client_id: context.client_id as u32,
                             entries: protobuf_entries,
+                            paste_shortcut: context.paste_shortcut,
                         },
                     )),
                 })
@@ -2754,6 +2788,7 @@ impl TryFrom<ProtobufModeUpdatePayload> for ModeInfo {
             session_ascended,
             nested_descend_keys,
             remote_client: protobuf_mode_update_payload.remote_client,
+            hidden_bars: HiddenBars::from_names(&protobuf_mode_update_payload.hidden_bars),
         };
         Ok(mode_info)
     }
@@ -2797,6 +2832,7 @@ impl TryFrom<ModeInfo> for ProtobufModeUpdatePayload {
             .map(|key| key.to_kdl())
             .collect();
         let remote_client = mode_info.remote_client;
+        let hidden_bars = mode_info.hidden_bars.names();
         let protobuf_input_mode_keybinds = keybinds_to_protobuf(mode_info.keybinds);
         Ok(ProtobufModeUpdatePayload {
             current_mode: current_mode as i32,
@@ -2822,6 +2858,7 @@ impl TryFrom<ModeInfo> for ProtobufModeUpdatePayload {
             session_ascended,
             nested_descend_keys,
             remote_client,
+            hidden_bars,
         })
     }
 }
@@ -2906,6 +2943,7 @@ impl TryFrom<ProtobufEventType> for EventType {
             ProtobufEventType::GlobalAttentionUpdate => EventType::GlobalAttentionUpdate,
             ProtobufEventType::SessionHistoryUpdate => EventType::SessionHistoryUpdate,
             ProtobufEventType::DesktopIntegration => EventType::DesktopIntegration,
+            ProtobufEventType::PluginSettingsEntries => EventType::PluginSettingsEntries,
             ProtobufEventType::LiveViewStateChanged => EventType::LiveViewStateChanged,
             ProtobufEventType::CommandChanged => EventType::CommandChanged,
             ProtobufEventType::AvailableLayoutInfo => EventType::AvailableLayoutInfo,
@@ -2985,6 +3023,7 @@ impl TryFrom<EventType> for ProtobufEventType {
             EventType::GlobalAttentionUpdate => ProtobufEventType::GlobalAttentionUpdate,
             EventType::SessionHistoryUpdate => ProtobufEventType::SessionHistoryUpdate,
             EventType::DesktopIntegration => ProtobufEventType::DesktopIntegration,
+            EventType::PluginSettingsEntries => ProtobufEventType::PluginSettingsEntries,
             EventType::LiveViewStateChanged => ProtobufEventType::LiveViewStateChanged,
             EventType::CommandChanged => ProtobufEventType::CommandChanged,
             EventType::AvailableLayoutInfo => ProtobufEventType::AvailableLayoutInfo,
@@ -3231,6 +3270,7 @@ fn serialize_mode_update_event_with_non_default_values() {
             KeyWithModifier::new(BareKey::Down),
         ],
         remote_client: Some("over SSH from 192.168.1.5".to_owned()),
+        hidden_bars: HiddenBars::from_names(&["tab-bar"]),
     });
     let protobuf_event: ProtobufEvent = mode_update_event.clone().try_into().unwrap();
     let serialized_protobuf_event = protobuf_event.encode_to_vec();
@@ -4545,6 +4585,10 @@ impl TryFrom<ProtobufContextMenuAction> for ContextMenuAction {
                         ClickedPaneAction::ToggleIgnoreOutput
                     },
                     Ok(ProtobufClickedPaneAction::ToggleWatch) => ClickedPaneAction::ToggleWatch,
+                    Ok(ProtobufClickedPaneAction::HideBar) => ClickedPaneAction::HideBar,
+                    Ok(ProtobufClickedPaneAction::PasteFromClipboard) => {
+                        ClickedPaneAction::PasteFromClipboard
+                    },
                     Err(_) => return Err("Unknown clicked pane action in a context menu entry"),
                 };
                 Ok(ContextMenuAction::ClickedPane(action))
@@ -4596,6 +4640,10 @@ impl TryFrom<ContextMenuAction> for ProtobufContextMenuAction {
                         ProtobufClickedPaneAction::ToggleIgnoreOutput
                     },
                     ClickedPaneAction::ToggleWatch => ProtobufClickedPaneAction::ToggleWatch,
+                    ClickedPaneAction::HideBar => ProtobufClickedPaneAction::HideBar,
+                    ClickedPaneAction::PasteFromClipboard => {
+                        ProtobufClickedPaneAction::PasteFromClipboard
+                    },
                 };
                 ProtobufContextMenuActionKind::ClickedPane(action as i32)
             },
@@ -4726,6 +4774,7 @@ mod context_menu_tests {
             line: 2,
             column: 7,
             client_id: 1,
+            paste_shortcut: Some("Ctrl Shift v".to_owned()),
         };
         let entries = vec![
             ContextMenuEntry::item(
@@ -4753,6 +4802,7 @@ mod context_menu_tests {
             line: 3,
             column: 4,
             client_id: 1,
+            paste_shortcut: None,
         };
         let entries = vec![ContextMenuEntry::Item {
             label: "Watch this pane".to_owned(),
@@ -5488,5 +5538,38 @@ mod live_view_event_tests {
         assert!(!proto.contains("MirrorStateChanged"));
         assert!(!proto.contains("MirrorPaneInfo"));
         assert_ne!(ProtobufEventType::LiveViewStateChanged as i32, 70);
+    }
+}
+
+#[cfg(test)]
+mod plugin_settings_entries_tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn plugin_settings_entries_round_trip() {
+        for event in [
+            Event::PluginSettingsEntries(vec![]),
+            Event::PluginSettingsEntries(vec![
+                PluginSettingsEntry {
+                    plugin_id: 3,
+                    title: "Status bar".to_owned(),
+                },
+                PluginSettingsEntry {
+                    plugin_id: 7,
+                    title: "Clock".to_owned(),
+                },
+            ]),
+        ] {
+            let protobuf = ProtobufEvent::try_from(event.clone()).unwrap();
+            let decoded: ProtobufEvent =
+                Message::decode(protobuf.encode_to_vec().as_slice()).unwrap();
+            assert_eq!(Event::try_from(decoded).unwrap(), event);
+        }
+        let protobuf: ProtobufEventType = EventType::PluginSettingsEntries.try_into().unwrap();
+        assert_eq!(
+            EventType::try_from(protobuf).unwrap(),
+            EventType::PluginSettingsEntries
+        );
     }
 }
